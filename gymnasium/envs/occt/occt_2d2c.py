@@ -5,6 +5,12 @@ import os
 import yaml  
 from model import Model2D2C
 import datetime
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.animation import FuncAnimation
+import cv2
+from PIL import Image
+from io import BytesIO
 
 class TwoCarrierEnv(gym.Env):
     """两辆车运载超大件系统的自定义强化学习环境"""
@@ -51,9 +57,17 @@ class TwoCarrierEnv(gym.Env):
         # 第一辆车的固定控制量（可移到2d2c.yaml中配置）
         self.u1_fixed = np.array([0, 0, 1e3, 1e3])  # 示例：直驶，固定推力
         
-        # 渲染相关
+        # 可视化相关初始化
         self.render_mode = render_mode
-        self.render_frames = []
+        self.render_frames = []  # 存储rgb_array帧
+        self.trajectories = {   # 存储轨迹数据
+            'cargo': [],
+            'car1': [],
+            'car2': []
+        }
+        self.fig = None
+        self.ax = None
+        self.animation = None
 
     def _load_config(self, config_path):
         """加载同一目录下的2d2c.yaml配置文件"""
@@ -151,6 +165,8 @@ class TwoCarrierEnv(gym.Env):
         # 获取观测、奖励
         observation = self._get_observation()
         reward = self._calculate_reward()
+        # 记录轨迹数据
+        self._record_trajectories()
         
         # 判断终止条件（仿真结束）
         terminated = self.model.is_finish
@@ -176,50 +192,160 @@ class TwoCarrierEnv(gym.Env):
         # 重新初始化模型（复用加载的配置）
         self.model = Model2D2C(self.config)
         self.render_frames = []
+        self.trajectories = {   # 重置轨迹
+            'cargo': [],
+            'car1': [],
+            'car2': []
+        }
+        self._reset_visualization()  # 重置可视化
         observation = self._get_observation()
-        info = {}
-        return observation, info
+        return observation, {}
 
-    def render(self):
-        """返回渲染帧（用于rgb_array模式）"""
-        if self.render_mode == "rgb_array":
-            return self._render_frame()
-
+    def _record_trajectories(self):
+        """记录轨迹数据用于可视化"""
+        # 超大件位置
+        cargo_pos = (self.model.x[0], self.model.x[1])
+        self.trajectories['cargo'].append(cargo_pos)
+        
+        # 车辆位置
+        x1, y1 = self.model.getXYi(self.model.x, 0)
+        x2, y2 = self.model.getXYi(self.model.x, 1)
+        self.trajectories['car1'].append((x1, y1))
+        self.trajectories['car2'].append((x2, y2))
+    
+    def _reset_visualization(self):
+        """重置可视化画布"""
+        if self.fig is not None:
+            plt.close(self.fig)
+        self.fig, self.ax = plt.subplots(figsize=(8, 8))
+        self.fig.subplots_adjust(left=0, bottom=0, right=1, top=1)
+    
     def _render_frame(self):
-        """生成单帧渲染图像（基于原模型可视化方法）"""
+        """生成单帧渲染图像（增强版）"""
+        # 清除当前轴
+        self.ax.clear()
+        
+        # 获取当前状态数据
+        x = self.model.x
+        Xo, Yo, Psio = x[0], x[1], x[2]
+        Psi1, Psi2 = x[3], x[4]
+        x1, y1 = self.model.getXYi(x, 0)
+        x2, y2 = self.model.getXYi(x, 1)
+        
+        # 获取铰接力
+        Fh2_x = self.model.Fh_arch[self.model.count, 2]
+        Fh2_y = self.model.Fh_arch[self.model.count, 3]
+        
+        # 设置坐标范围
+        range_val = self.config.get('range', 20)
+        self.ax.set_xlim(Xo - range_val, Xo + range_val)
+        self.ax.set_ylim(Yo - range_val, Yo + range_val)
+        self.ax.set_aspect('equal')
+
+        # 绘制轨迹
+        if len(self.trajectories['cargo']) > 1:
+            cargo_traj = np.array(self.trajectories['cargo'])
+            self.ax.plot(cargo_traj[:,0], cargo_traj[:,1], 'k--', alpha=0.5, label='货物轨迹')
+            car1_traj = np.array(self.trajectories['car1'])
+            self.ax.plot(car1_traj[:,0], car1_traj[:,1], 'b--', alpha=0.5, label='车辆1轨迹')
+            car2_traj = np.array(self.trajectories['car2'])
+            self.ax.plot(car2_traj[:,0], car2_traj[:,1], 'r--', alpha=0.5, label='车辆2轨迹')
+
+        # 绘制超大件（矩形）
+        cargo_bias = self.config.get('oversized_cargo_bias', 1)
+        cargo_width = self.config.get('oversized_cargo_width', 3)
+        cargo = patches.Rectangle(
+            (Xo - cargo_bias, Yo - cargo_width/2),
+            2*cargo_bias, cargo_width,
+            angle=np.degrees(Psio),
+            rotation_point='center',
+            facecolor='gray', alpha=0.7, label='超大件'
+        )
+        self.ax.add_patch(cargo)
+
+        # 绘制车辆1（蓝色箭头）
+        car1 = patches.Arrow(
+            x1, y1,
+            3*np.cos(Psi1), 3*np.sin(Psi1),
+            width=2, color='blue', label='车辆1'
+        )
+        self.ax.add_patch(car1)
+
+        # 绘制车辆2（红色箭头）
+        car2 = patches.Arrow(
+            x2, y2,
+            3*np.cos(Psi2), 3*np.sin(Psi2),
+            width=2, color='red', label='车辆2'
+        )
+        self.ax.add_patch(car2)
+
+        # 绘制铰接力（绿色矢量）
+        self.ax.quiver(
+            x2, y2, Fh2_x*0.001, Fh2_y*0.001,
+            color='green', width=0.005, label='铰接力'
+        )
+
+        # 添加文本信息
+        self.ax.text(0.05, 0.95, f"步数: {self.model.count}", 
+                     transform=self.ax.transAxes, backgroundcolor='w')
+        self.ax.text(0.05, 0.90, f"铰接力: ({Fh2_x:.1f}, {Fh2_y:.1f})", 
+                     transform=self.ax.transAxes, backgroundcolor='w')
+        
+        self.ax.legend(loc='upper right')
+
+        # 渲染为图像
+        self.fig.canvas.draw()
+        buf = BytesIO()
+        self.fig.savefig(buf, format='png', bbox_inches='tight', dpi=150)
+        buf.seek(0)
+        img = Image.open(buf).convert('RGB')
+        frame = np.array(img)
+
         if self.render_mode == "human":
-            # 实时显示（可调用原模型的plot方法）
-            pass
+            plt.pause(0.01)  # 实时显示
         elif self.render_mode == "rgb_array":
-            # 返回RGB数组（示例：黑色背景，可扩展为实际可视化）
-            return np.zeros((480, 640, 3), dtype=np.uint8)
+            self.render_frames.append(frame)
+        
+        return frame
+
 
     def close(self):
-        """关闭环境（沿用你之前验证过的可视化逻辑，生成带时间戳的视频）"""
-        # 1. 先判断模型是否有generateVideo方法
-        if not hasattr(self.model, 'generateVideo'):
-            print("提示：模型无generateVideo方法，跳过视频生成")
-            return
-        
-        # 2. 沿用你的路径逻辑：当前文件目录 + output（绝对路径，避免错乱）
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        output_dir = os.path.join(current_dir, "output")
-        
-        # 3. 提前创建目录（递归创建，确保所有父目录都存在）
-        os.makedirs(output_dir, exist_ok=True)
-        print(f"确认输出目录存在：{output_dir}")
-        
-        # 4. 沿用你的文件名逻辑：配置名 + 时间戳 + .mp4（避免文件覆盖）
-        time_str = datetime.datetime.now().strftime(r'%y%m%d%H%S')
-        file_name = f"{self.config_name}_{time_str}.mp4"
-        
-        # 5. 尝试生成视频，捕获异常避免程序崩溃
-        try:
-            self.model.generateVideo(output_dir, file_name)  # 与你之前的调用格式一致
-            video_path = os.path.join(output_dir, file_name)
-            print(f"视频已成功保存至：{video_path}")
-        except Exception as e:
-            print(f"错误：生成视频失败，原因：{e}")
+        """关闭环境并生成视频"""
+        if self.fig is not None:
+            plt.close(self.fig)
+
+        if self.render_mode == "rgb_array" and len(self.render_frames) > 0:
+            try:
+                # 创建输出目录
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                output_dir = os.path.join(current_dir, "output")
+                os.makedirs(output_dir, exist_ok=True)
+
+                # 生成视频文件名
+                time_str = datetime.datetime.now().strftime(r'%y%m%d%H%S')
+                file_name = f"{self.config_name}_vis_{time_str}.mp4"
+                video_path = os.path.join(output_dir, file_name)
+
+                # 使用OpenCV合成视频
+                fps = self.metadata['render_fps']
+                height, width, _ = self.render_frames[0].shape
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+
+                for frame in self.render_frames:
+                    # 转换为BGR格式（OpenCV要求）
+                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+                out.release()
+                print(f"可视化视频已保存至: {video_path}")
+
+            except Exception as e:
+                print(f"生成视频失败: {e}")
+                # 保存单帧图像作为备选
+                for i, frame in enumerate(self.render_frames[::10]):  # 每10帧保存一张
+                    img_path = os.path.join(output_dir, f"frame_{i}.png")
+                    cv2.imwrite(img_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                print(f"已保存关键帧至: {output_dir}")
 
 
 # 注册环境（便于通过gym.make()调用）
@@ -231,44 +357,59 @@ gym.register(
 
 # 测试代码（验证环境是否正常运行）
 if __name__ == "__main__":
-    # 安装依赖提醒（若未安装pyyaml）
-    try:
-        import yaml
-    except ImportError:
-        print("请先安装pyyaml：pip install pyyaml")
-        exit(1)
-
     # 创建环境
-    env = gym.make("TwoCarrierEnv-v0")
+    RENDER_MODE = "human"  # 可切换为 "rgb_array" 生成视频
+    env = gym.make(
+        "TwoCarrierEnv-v0",
+        render_mode=RENDER_MODE,
+        config_path=None  # 使用默认2d2c.yaml配置
+    )
     obs, info = env.reset(seed=42)
     print("=" * 50)
     print("初始观测形状：", obs.shape)
-    print("初始观测值：", obs)
-    print("初始辅助信息：", info)
+    print(f"初始观测值（关键部分）：Xo={obs[0]:.2f}, Yo={obs[1]:.2f}, 铰接力X={obs[-2]:.2f}, 铰接力Y={obs[-1]:.2f}")
+    print(f"初始辅助信息：{info}")
     print("=" * 50)
 
-    # 运行1000步仿真
-    for step in range(1000):
-        # 随机采样动作（实际训练时替换为RL算法输出）
-        action = env.action_space.sample()
-        obs, reward, terminated, truncated, info = env.step(action)
-        
-        # 打印步序信息
-        print(f"第 {step+1} 步")
-        print(f"  动作：{[round(a, 4) for a in action]}")
-        print(f"  观测：{[round(o, 4) for o in obs]}")
-        print(f"  奖励：{reward:.4f}")
-        print(f"  第二辆车铰接力：X={info['Fh2'][0]:.2f}, Y={info['Fh2'][1]:.2f}")
-        print(f"  两车位置误差：{info['pos_error']:.2f}")
-        print(f"  任务是否终止：{terminated}，是否截断：{truncated}")
-        print("-" * 30)
+    # 5. 运行仿真（精简打印，每隔100步打印一次关键信息）
+    total_steps = 0
+    max_episodes = 1  # 可调整仿真轮数
+    for episode in range(max_episodes):
+        print(f"\n===== 第 {episode+1}/{max_episodes} 轮仿真开始 =====")
+        episode_reward = 0  # 累计每轮奖励
+        for step in range(env.spec.max_episode_steps):
+            total_steps += 1
+            # 随机采样动作（实际训练时替换为RL算法输出；若要稳定运动，可改用固定动作）
+            # 固定动作示例（第二辆车直驶，推力适中）：action = np.array([0, 0, 500, 500])
+            action = env.action_space.sample()
+            
+            # 环境交互
+            obs, reward, terminated, truncated, info = env.step(action)
+            episode_reward += reward
 
-        # 若episode结束，重置环境
-        if terminated or truncated:
-            print("Episode结束，重置环境...")
-            obs, info = env.reset()
-            print("=" * 50)
+            # 精简打印：每隔100步打印一次，避免冗余
+            if (step + 1) % 100 == 0:
+                print(f"  第 {step+1} 步 | 累计奖励：{episode_reward:.2f}")
+                print(f"  铰接力（X,Y）：({info['Fh2'][0]:.2f}, {info['Fh2'][1]:.2f}) | 位置误差：{info['pos_error']:.2f}")
+                print(f"  任务状态：终止={terminated} | 截断={truncated}")
+                print("  " + "-" * 20)
 
-    # 关闭环境，生成仿真视频
+            # 若episode结束，重置环境
+            if terminated or truncated:
+                finish_reason = "仿真步数耗尽（truncated）" if truncated else "满足终止条件（terminated）"
+                print(f"  第 {step+1} 步：{finish_reason}，本轮结束")
+                print(f"  本轮累计奖励：{episode_reward:.2f}")
+                obs, info = env.reset()
+                break
+
+    # 6. 关闭环境，生成视频（仅rgb_array模式生效）
     env.close()
-    print("仿真结束，视频已保存至 ./sim_results/two_carrier.mp4")
+    
+    # 7. 规范输出提示
+    if RENDER_MODE == "rgb_array":
+        print("\n仿真结束！视频已保存至当前目录的【output】文件夹")
+    elif RENDER_MODE == "human":
+        print("\n仿真结束！实时可视化窗口已关闭")
+    else:
+        print("\n仿真结束！未启用可视化功能")
+    print("=" * 50)
