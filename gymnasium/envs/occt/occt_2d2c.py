@@ -51,13 +51,19 @@ class TwoCarrierEnv(gym.Env):
             low=obs_low, high=obs_high, dtype=np.float64
         )
         
-        # 动作空间定义（第二辆车的控制量：4个参数）
-        # [前轮转向角, 后轮转向角, 前轮推力, 后轮推力]
+        # 原始动作空间上下限（保存用于归一化/反归一化）
+        self.original_action_low = np.array([-np.pi/6, -np.pi/6, 0, 0])  # 原始下限
+        self.original_action_high = np.array([np.pi/6, np.pi/6, 1e3, 1e3])  # 原始上限
+        
+        # 归一化后的动作空间（统一映射到[-1, 1]区间）
         self.action_space = spaces.Box(
-            low=np.array([-np.pi/6, -np.pi/6, 0, 0]),  # 转向角限制±30°，推力非负
-            high=np.array([np.pi/6, np.pi/6, 1e3, 1e3]),  # 推力上限示例值
+            low=-np.ones(4, dtype=np.float64),  # 归一化下限：[-1, -1, -1, -1]
+            high=np.ones(4, dtype=np.float64),  # 归一化上限：[1, 1, 1, 1]
             dtype=np.float64
         )
+        print("动作空间已归一化至[-1, 1]区间")
+        print(f"原始动作范围：\n  转向角：±{np.pi/6:.2f}rad（±30°），推力：[0, {1e3}]")
+        print(f"归一化后动作范围：[-1, 1]（4维）")
         
         # 第一辆车的固定控制量（简化问题，仅训练第二辆车）
         self.u1_fixed = np.array([np.pi/6, 0, 1e3, 1e3])  # 示例：固定前轮转角和推力
@@ -129,6 +135,39 @@ class TwoCarrierEnv(gym.Env):
             'oversized_cargo_bias': 2, 'oversized_cargo_width': 3
         }
 
+    def normalize_action(self, original_action):
+        """
+        将原始动作（原始空间）归一化到[-1, 1]区间
+        :param original_action: 原始动作，shape=(4,)，对应[前轮转向角, 后轮转向角, 前轮推力, 后轮推力]
+        :return: 归一化后的动作，shape=(4,)，范围[-1, 1]
+        """
+        # 线性归一化公式：norm_action = 2 * (orig_action - orig_low) / (orig_high - orig_low) - 1
+        # 避免除零（防止原始上下限相等）
+        orig_range = self.original_action_high - self.original_action_low
+        orig_range = np.where(orig_range == 0, 1e-8, orig_range)
+        
+        norm_action = 2 * (original_action - self.original_action_low) / orig_range - 1
+        # 裁剪到[-1, 1]，防止超出边界
+        norm_action = np.clip(norm_action, -1, 1)
+        return norm_action.astype(np.float64)
+
+    def denormalize_action(self, normalized_action):
+        """
+        将归一化动作（[-1, 1]）反归一化到原始动作空间
+        :param normalized_action: 归一化动作，shape=(4,)，范围[-1, 1]
+        :return: 原始动作，shape=(4,)，对应原始上下限范围
+        """
+        # 反归一化公式：orig_action = orig_low + (norm_action + 1) * (orig_high - orig_low) / 2
+        orig_range = self.original_action_high - self.original_action_low
+        orig_action = self.original_action_low + (normalized_action + 1) * orig_range / 2
+        # 裁剪到原始动作范围，确保物理有效性
+        orig_action = np.clip(
+            orig_action, 
+            self.original_action_low, 
+            self.original_action_high
+        )
+        return orig_action.astype(np.float64)
+
     def _get_observation(self):
         """从模型提取观测值"""
         x = self.model.x  # 当前状态向量
@@ -169,10 +208,13 @@ class TwoCarrierEnv(gym.Env):
         return - (hinge_force_penalty + 0 * tracking_penalty + 0 * control_smooth_penalty)
 
     def step(self, action):
-        """环境一步交互"""
-        # 组合控制量：第一辆车控制量 + 第二辆车动作
+        """环境一步交互（注意：传入的action是归一化后的动作，需先反归一化）"""
+        # 反归一化：将[-1, 1]的动作映射回原始动作空间
+        original_action = self.denormalize_action(action)
+        
+        # 组合控制量：第一辆车控制量 + 第二辆车原始动作
         u1 = self.u1_fixed
-        u = np.concatenate([u1, action])
+        u = np.concatenate([u1, original_action])
         
         self.model.step(u)
         observation = self._get_observation()
@@ -197,7 +239,8 @@ class TwoCarrierEnv(gym.Env):
                 self.model.getXYi(self.model.x, 1)[1] - self.model.getXYi(self.model.x, 0)[1]
             ),
             'u1': u1,  # 新增：保存第一辆车控制量，用于可视化车轮摆角
-            'u2': action          # 新增：保存第二辆车控制量，用于可视化车轮摆角
+            'u2_normalized': action,  # 归一化后的动作
+            'u2_original': original_action  # 原始动作（便于调试）
         }
 
         return observation, reward, terminated, truncated, info
@@ -514,7 +557,7 @@ gym.register(
     kwargs={"enable_visualization": True}  # 添加默认参数
 )
 
-# 测试代码（验证环境是否正常运行）
+# 测试代码
 if __name__ == "__main__":
     # 创建环境
     RENDER_MODE = "rgb_array"
@@ -536,6 +579,20 @@ if __name__ == "__main__":
     print(f"初始辅助信息：{info}")
     print("=" * 50)
 
+    # 测试动作归一化与反归一化
+    print("\n--- 动作归一化/反归一化测试 ---")
+    # 原始测试动作
+    original_test_action = np.array([np.pi/12, -np.pi/12, 500, 500])  # 中间值
+    print(f"原始测试动作：{original_test_action}")
+    # 归一化
+    normalized_action = raw_env.normalize_action(original_test_action)
+    print(f"归一化后动作：{normalized_action}（范围应在[-1,1]）")
+    # 反归一化
+    denormalized_action = raw_env.denormalize_action(normalized_action)
+    print(f"反归一化后动作：{denormalized_action}（应与原始动作一致）")
+    print(f"归一化/反归一化误差：{np.mean(np.abs(denormalized_action - original_test_action)):.6f}")
+    print("--- 测试结束 ---")
+
     # 5. 运行仿真（精简打印，每隔100步打印一次关键信息）
     total_steps = 0
     max_episodes = 1  # 可调整仿真轮数
@@ -544,19 +601,20 @@ if __name__ == "__main__":
         episode_reward = 0  # 累计每轮奖励
         for step in range(env.spec.max_episode_steps):
             total_steps += 1
-            # 随机采样动作（实际训练时替换为RL算法输出；若要稳定运动，可改用固定动作）
-            # 固定动作示例（第二辆车直驶，推力适中）：action = np.array([0, 0, 500, 500])
-            # action = env.action_space.sample()
-            action = np.array([0, 0, 500, 500])  # 测试用：第二辆车不动作
+            # 采样归一化后的动作（RL算法输出的动作）
+            # 固定归一化动作示例（对应原始动作：[0, 0, 500, 500]）
+            normalized_action = np.array([0, 0, 0, 0])  # 归一化后中间值
+            # 也可随机采样归一化动作：normalized_action = env.action_space.sample()
             
-            # 环境交互
-            obs, reward, terminated, truncated, info = env.step(action)
+            # 环境交互（传入归一化动作，环境内部自动反归一化）
+            obs, reward, terminated, truncated, info = env.step(normalized_action)
             episode_reward += reward
 
             # 精简打印：每隔100步打印一次，避免冗余
             if (step + 1) % 100 == 0:
                 print(f"  第 {step+1} 步 | 累计奖励：{episode_reward:.2f}")
                 print(f"  铰接力（X,Y）：({info['Fh2'][0]:.2f}, {info['Fh2'][1]:.2f}) | 位置误差：{info['pos_error']:.2f}")
+                print(f"  归一化动作：{info['u2_normalized']} | 原始动作：{info['u2_original']}")
                 print(f"  任务状态：终止={terminated} | 截断={truncated}")
                 print("  " + "-" * 20)
 
