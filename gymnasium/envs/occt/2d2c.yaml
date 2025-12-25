@@ -69,5 +69,5 @@ fe_c: 1.77 # front end
 re_c: 1.85 # rear end
 alpha_c: 0.6
 fc_c: "#BBBBBB"
-oversized_cargo_bias: 1 # 货物尺寸相对于载体宽度的额外增加比例
+oversized_cargo_bias: 1 # 超大件半长
 oversized_cargo_width: 2.5 # 货物宽度

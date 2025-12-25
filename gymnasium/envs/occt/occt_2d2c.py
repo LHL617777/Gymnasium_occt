@@ -12,6 +12,9 @@ import cv2
 from PIL import Image
 from io import BytesIO
 
+plt.rcParams["font.sans-serif"]=["SimHei"] #设置字体
+plt.rcParams["axes.unicode_minus"]=False #该语句解决图像中的“-”负号的乱码问题
+
 class TwoCarrierEnv(gym.Env):
     """两辆车运载超大件系统的自定义强化学习环境"""
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 10}
@@ -63,7 +66,9 @@ class TwoCarrierEnv(gym.Env):
         self.trajectories = {   # 存储轨迹数据
             'cargo': [],
             'car1': [],
-            'car2': []
+            'car2': [],
+            'hinge1': [],
+            'hinge2': []
         }
         self.fig = None
         self.ax = None
@@ -195,7 +200,9 @@ class TwoCarrierEnv(gym.Env):
         self.trajectories = {   # 重置轨迹
             'cargo': [],
             'car1': [],
-            'car2': []
+            'car2': [],
+            'hinge1': [],
+            'hinge2': []
         }
         self._reset_visualization()  # 重置可视化
         observation = self._get_observation()
@@ -212,88 +219,180 @@ class TwoCarrierEnv(gym.Env):
         x2, y2 = self.model.getXYi(self.model.x, 1)
         self.trajectories['car1'].append((x1, y1))
         self.trajectories['car2'].append((x2, y2))
-    
+
+        # 新增：铰接点轨迹（清晰展示车辆与超大件的连接关系）
+        Xo, Yo, Psio = self.model.x[0], self.model.x[1], self.model.x[2]
+        # 铰接点1（车辆1与超大件连接点）
+        hinge1_x = Xo + self.config['x__o_1'] * np.cos(Psio) - self.config['y__o_1'] * np.sin(Psio)
+        hinge1_y = Yo + self.config['x__o_1'] * np.sin(Psio) + self.config['y__o_1'] * np.cos(Psio)
+        # 铰接点2（车辆2与超大件连接点）
+        hinge2_x = Xo + self.config['x__o_2'] * np.cos(Psio) - self.config['y__o_2'] * np.sin(Psio)
+        hinge2_y = Yo + self.config['x__o_2'] * np.sin(Psio) + self.config['y__o_2'] * np.cos(Psio)
+        self.trajectories['hinge1'].append((hinge1_x, hinge1_y))
+        self.trajectories['hinge2'].append((hinge2_x, hinge2_y))
+
     def _reset_visualization(self):
-        """重置可视化画布"""
+        """重置可视化画布（优化画布布局，避免元素遮挡）"""
         if self.fig is not None:
             plt.close(self.fig)
-        self.fig, self.ax = plt.subplots(figsize=(8, 8))
-        self.fig.subplots_adjust(left=0, bottom=0, right=1, top=1)
+        # 调整画布大小，预留信息显示区域
+        self.fig, self.ax = plt.subplots(figsize=(10, 8))
+        self.fig.subplots_adjust(left=0.05, bottom=0.05, right=0.95, top=0.95)
+        # 设置画布背景色，提升对比度
+        self.ax.set_facecolor('#f8f8f8')
     
     def _render_frame(self):
-        """生成单帧渲染图像（增强版）"""
+        """生成单帧渲染图像（核心优化：超大件+运载车辆可视化增强）"""
         # 清除当前轴
         self.ax.clear()
         
-        # 获取当前状态数据
+        # 获取当前状态数据（精准提取，确保可视化与仿真状态一致）
         x = self.model.x
         Xo, Yo, Psio = x[0], x[1], x[2]
         Psi1, Psi2 = x[3], x[4]
-        x1, y1 = self.model.getXYi(x, 0)
-        x2, y2 = self.model.getXYi(x, 1)
-        
-        # 获取铰接力
+        # 车辆质心位置
+        car1_cx, car1_cy = self.model.getXYi(x, 0)
+        car2_cx, car2_cy = self.model.getXYi(x, 1)
+        # 铰接力
         Fh2_x = self.model.Fh_arch[self.model.count, 2]
         Fh2_y = self.model.Fh_arch[self.model.count, 3]
-        
-        # 设置坐标范围
-        range_val = self.config.get('range', 20)
-        self.ax.set_xlim(Xo - range_val, Xo + range_val)
-        self.ax.set_ylim(Yo - range_val, Yo + range_val)
+        # 铰接点位置（超大件与车辆的连接点，基于配置计算）
+        hinge1_x = Xo + self.config['x__o_1'] * np.cos(Psio) - self.config['y__o_1'] * np.sin(Psio)
+        hinge1_y = Yo + self.config['x__o_1'] * np.sin(Psio) + self.config['y__o_1'] * np.cos(Psio)
+        hinge2_x = Xo + self.config['x__o_2'] * np.cos(Psio) - self.config['y__o_2'] * np.sin(Psio)
+        hinge2_y = Yo + self.config['x__o_2'] * np.sin(Psio) + self.config['y__o_2'] * np.cos(Psio)
+
+        # 1. 优化坐标范围：自适应所有元素，避免车辆/超大件移出视野
+        all_x = [Xo, car1_cx, car2_cx, hinge1_x, hinge2_x]
+        all_y = [Yo, car1_cy, car2_cy, hinge1_y, hinge2_y]
+        x_min, x_max = min(all_x) - 10, max(all_x) + 10
+        y_min, y_max = min(all_y) - 10, max(all_y) + 10
+        self.ax.set_xlim(x_min, x_max)
+        self.ax.set_ylim(y_min, y_max)
         self.ax.set_aspect('equal')
+        self.ax.set_xlabel('X 坐标 (m)', fontsize=10)
+        self.ax.set_ylabel('Y 坐标 (m)', fontsize=10)
+        self.ax.set_title('双车运载超大件仿真可视化', fontsize=12, fontweight='bold')
 
-        # 绘制轨迹
-        if len(self.trajectories['cargo']) > 1:
-            cargo_traj = np.array(self.trajectories['cargo'])
-            self.ax.plot(cargo_traj[:,0], cargo_traj[:,1], 'k--', alpha=0.5, label='货物轨迹')
-            car1_traj = np.array(self.trajectories['car1'])
-            self.ax.plot(car1_traj[:,0], car1_traj[:,1], 'b--', alpha=0.5, label='车辆1轨迹')
-            car2_traj = np.array(self.trajectories['car2'])
-            self.ax.plot(car2_traj[:,0], car2_traj[:,1], 'r--', alpha=0.5, label='车辆2轨迹')
-
-        # 绘制超大件（矩形）
-        cargo_bias = self.config.get('oversized_cargo_bias', 1)
-        cargo_width = self.config.get('oversized_cargo_width', 3)
+        # 2. 优化超大件可视化：更逼真，标记铰接点和质心
+        cargo_bias = self.config.get('oversized_cargo_bias', 3)
+        cargo_width = self.config.get('oversized_cargo_width', 2.5)
+        # 超大件主体（灰色填充，黑色边框，提升辨识度）
         cargo = patches.Rectangle(
             (Xo - cargo_bias, Yo - cargo_width/2),
             2*cargo_bias, cargo_width,
             angle=np.degrees(Psio),
-            rotation_point='center',
-            facecolor='gray', alpha=0.7, label='超大件'
+            rotation_point='center',  # 确保绕质心旋转，与仿真一致
+            facecolor='#7f8c8d',      # 深灰色，更贴近真实货物
+            edgecolor='black',        # 黑色边框，区分轮廓
+            linewidth=1.5,
+            alpha=0.8,
+            label='超大件（质心）'
         )
         self.ax.add_patch(cargo)
+        # 标记超大件质心（红色圆点，清晰定位）
+        self.ax.scatter(Xo, Yo, color='red', s=50, zorder=5, label='超大件质心')
+        # 标记铰接点（蓝色/橙色方块，区分两车连接点）
+        self.ax.scatter(hinge1_x, hinge1_y, color='blue', s=60, marker='s', zorder=5, label='铰接点1（车1）')
+        self.ax.scatter(hinge2_x, hinge2_y, color='orange', s=60, marker='s', zorder=5, label='铰接点2（车2）')
+        # 绘制超大件与铰接点的连接线（展示连接关系）
+        self.ax.plot([Xo, hinge1_x], [Yo, hinge1_y], color='black', linewidth=1, linestyle=':')
+        self.ax.plot([Xo, hinge2_x], [Yo, hinge2_y], color='black', linewidth=1, linestyle=':')
 
-        # 绘制车辆1（蓝色箭头）
-        car1 = patches.Arrow(
-            x1, y1,
-            3*np.cos(Psi1), 3*np.sin(Psi1),
-            width=2, color='blue', label='车辆1'
+        # 3. 优化运载车辆可视化：替换箭头为真实车辆形状，区分车头车尾
+        car_length = 3  # 车辆长度
+        car_width = 1.5 # 车辆宽度
+        # 车辆1（蓝色，带车头标记，绕质心旋转）
+        # 车辆矩形（基于质心和姿态角定位，确保与仿真姿态一致）
+        car1 = patches.Rectangle(
+            (car1_cx - car_length/2, car1_cy - car_width/2),
+            car_length, car_width,
+            angle=np.degrees(Psi1),
+            rotation_point='center',
+            facecolor='#3498db',      # 亮蓝色，区分车辆1
+            edgecolor='black',
+            linewidth=1,
+            alpha=0.8,
+            label='运载车辆1'
         )
         self.ax.add_patch(car1)
+        # 标记车辆1车头（三角形，指示行驶方向）
+        car1_nose_x = car1_cx + (car_length/2) * np.cos(Psi1)
+        car1_nose_y = car1_cy + (car_length/2) * np.sin(Psi1)
+        self.ax.scatter(car1_nose_x, car1_nose_y, color='darkblue', s=30, marker='^', zorder=6)
 
-        # 绘制车辆2（红色箭头）
-        car2 = patches.Arrow(
-            x2, y2,
-            3*np.cos(Psi2), 3*np.sin(Psi2),
-            width=2, color='red', label='车辆2'
+        # 车辆2（红色，带车头标记，绕质心旋转）
+        car2 = patches.Rectangle(
+            (car2_cx - car_length/2, car2_cy - car_width/2),
+            car_length, car_width,
+            angle=np.degrees(Psi2),
+            rotation_point='center',
+            facecolor='#e74c3c',      # 亮红色，区分车辆2
+            edgecolor='black',
+            linewidth=1,
+            alpha=0.8,
+            label='运载车辆2'
         )
         self.ax.add_patch(car2)
+        # 标记车辆2车头（三角形，指示行驶方向）
+        car2_nose_x = car2_cx + (car_length/2) * np.cos(Psi2)
+        car2_nose_y = car2_cy + (car_length/2) * np.sin(Psi2)
+        self.ax.scatter(car2_nose_x, car2_nose_y, color='darkred', s=30, marker='^', zorder=6)
 
-        # 绘制铰接力（绿色矢量）
+        # 4. 优化轨迹绘制：分层显示，区分不同元素轨迹
+        if len(self.trajectories['cargo']) > 1:
+            # 超大件轨迹（黑色虚线，透明度更低，避免遮挡）
+            cargo_traj = np.array(self.trajectories['cargo'])
+            self.ax.plot(cargo_traj[:,0], cargo_traj[:,1], 'k--', alpha=0.3, linewidth=1, label='超大件轨迹')
+            # 车辆1轨迹（蓝色虚线）
+            car1_traj = np.array(self.trajectories['car1'])
+            self.ax.plot(car1_traj[:,0], car1_traj[:,1], '#3498db', linestyle='--', alpha=0.4, linewidth=1, label='车辆1轨迹')
+            # 车辆2轨迹（红色虚线）
+            car2_traj = np.array(self.trajectories['car2'])
+            self.ax.plot(car2_traj[:,0], car2_traj[:,1], '#e74c3c', linestyle='--', alpha=0.4, linewidth=1, label='车辆2轨迹')
+            # 铰接点轨迹（浅灰虚线，补充信息）
+            hinge1_traj = np.array(self.trajectories['hinge1'])
+            hinge2_traj = np.array(self.trajectories['hinge2'])
+            # 铰接点1轨迹：线型为':'，颜色通过color参数指定（蓝色）
+            self.ax.plot(
+                hinge1_traj[:,0], hinge1_traj[:,1], 
+                ':',  # 仅指定线型，颜色单独通过color参数传递
+                color='blue', 
+                alpha=0.2, 
+                linewidth=0.8
+            )
+            # 铰接点2轨迹：线型为':'，颜色通过color参数指定（橙色）
+            self.ax.plot(
+                hinge2_traj[:,0], hinge2_traj[:,1], 
+                ':',  # 仅指定线型，避免与完整颜色名称冲突
+                color='orange', 
+                alpha=0.2, 
+                linewidth=0.8
+            )
+        # 5. 铰接力可视化（优化矢量箭头，避免遮挡）
         self.ax.quiver(
-            x2, y2, Fh2_x*0.001, Fh2_y*0.001,
-            color='green', width=0.005, label='铰接力'
+            hinge2_x, hinge2_y,  # 从铰接点2出发，更贴合实际受力位置
+            Fh2_x*0.001, Fh2_y*0.001,
+            color='green', 
+            width=0.005, 
+            headwidth=5, 
+            headlength=8,
+            alpha=0.7,
+            label='铰接力（车辆2→超大件）'
         )
 
-        # 添加文本信息
-        self.ax.text(0.05, 0.95, f"步数: {self.model.count}", 
-                     transform=self.ax.transAxes, backgroundcolor='w')
-        self.ax.text(0.05, 0.90, f"铰接力: ({Fh2_x:.1f}, {Fh2_y:.1f})", 
-                     transform=self.ax.transAxes, backgroundcolor='w')
+        # 6. 优化文本信息：避免遮挡，排版更整洁
+        text_props = {'transform': self.ax.transAxes, 'backgroundcolor': 'white', 'fontsize': 9}
+        self.ax.text(0.02, 0.98, f"步数: {self.model.count}", va='top', **text_props)
+        self.ax.text(0.02, 0.94, f"超大件质心：({Xo:.1f}, {Yo:.1f})", va='top', **text_props)
+        self.ax.text(0.02, 0.90, f"铰接力：({Fh2_x:.1f}, {Fh2_y:.1f})", va='top', **text_props)
         
-        self.ax.legend(loc='upper right')
+        # 优化图例：避免重叠，自动调整位置
+        self.ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
+        # 添加网格，便于读取坐标
+        self.ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
 
-        # 渲染为图像
+        # 渲染为图像（原有逻辑不变，确保兼容性）
         self.fig.canvas.draw()
         buf = BytesIO()
         self.fig.savefig(buf, format='png', bbox_inches='tight', dpi=150)
