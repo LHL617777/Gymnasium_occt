@@ -21,7 +21,7 @@ class TwoCarrierEnv(gym.Env):
     """两辆车运载超大件系统的自定义强化学习环境"""
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 10}
 
-    def __init__(self, render_mode=None, config_path=None):
+    def __init__(self, render_mode=None, config_path=None, enable_visualization=True):
         super().__init__()
         
         # 加载2d2c.yaml配置文件（优先使用传入路径，否则加载同一目录下的2d2c.yaml）
@@ -62,8 +62,10 @@ class TwoCarrierEnv(gym.Env):
         # 第一辆车的固定控制量（简化问题，仅训练第二辆车）
         self.u1_fixed = np.array([np.pi/6, 0, 1e3, 1e3])  # 示例：固定前轮转角和推力
         
+        # 新增：可视化开关
+        self.enable_visualization = enable_visualization
         # 可视化相关初始化
-        self.render_mode = render_mode
+        self.render_mode = render_mode if enable_visualization else None
         self.render_frames = []  # 存储rgb_array帧
         self.trajectories = {   # 存储轨迹数据
             'cargo': [],
@@ -80,6 +82,7 @@ class TwoCarrierEnv(gym.Env):
         self.wheel_radius = 0.3  # 车轮半径
         self.wheel_width = 0.15  # 车轮宽度
         print(f"初始化渲染模式：{self.render_mode}，是否为rgb_array：{self.render_mode == 'rgb_array'}")
+        print(f"可视化功能：{'启用' if enable_visualization else '关闭'}")
 
     def _load_config(self, config_path):
         """加载同一目录下的2d2c.yaml配置文件"""
@@ -175,6 +178,13 @@ class TwoCarrierEnv(gym.Env):
         observation = self._get_observation()
         reward = self._calculate_reward()
         self._record_trajectories()
+
+        # 仅在启用可视化时记录轨迹和渲染
+        if self.enable_visualization:
+            self._record_trajectories()
+            self._render_frame()  
+            if self.render_mode == "human":
+                plt.pause(0.001)  
         
         # 判断终止条件（仿真结束）
         terminated = self.model.is_finish
@@ -190,26 +200,22 @@ class TwoCarrierEnv(gym.Env):
             'u2': action          # 新增：保存第二辆车控制量，用于可视化车轮摆角
         }
 
-        self._render_frame()  
-        if self.render_mode == "human":
-            plt.pause(0.001)  
-        
         return observation, reward, terminated, truncated, info
 
     def reset(self, seed=None, options=None, clear_frames=True):
-        """重置环境"""
         super().reset(seed=seed)
         self.model = Model2D2C(self.config)
-        if clear_frames and not self.is_sim_finished:
-            self.render_frames = []
-        self.trajectories = {   # 重置轨迹
-            'cargo': [],
-            'car1': [],
-            'car2': [],
-            'hinge1': [],
-            'hinge2': []
-        }
-        self._reset_visualization()  # 确保fig和ax被创建
+        if self.enable_visualization:
+            if clear_frames and not self.is_sim_finished:
+                self.render_frames = []
+            self.trajectories = {   # 重置轨迹
+                'cargo': [],
+                'car1': [],
+                'car2': [],
+                'hinge1': [],
+                'hinge2': []
+            }
+            self._reset_visualization()  # 仅在启用时初始化可视化
         observation = self._get_observation()
         return observation, {}
 
@@ -441,13 +447,12 @@ class TwoCarrierEnv(gym.Env):
         # 新增：打印关键状态，确认帧列表和渲染模式
         print(f"===== 进入close()方法 ======")
         print(f"当前render_mode：{self.render_mode}")
-        print(f"当前render_frames列表长度：{len(self.render_frames)}")
-        print(f"render_frames是否为列表：{isinstance(self.render_frames, list)}")
+        print(f"可视化功能状态：{'启用' if self.enable_visualization else '关闭'}")
         
         if self.fig is not None:
             plt.close(self.fig)
 
-        if self.render_mode == "rgb_array" and len(self.render_frames) > 0:
+        if self.enable_visualization and self.render_mode == "rgb_array" and len(self.render_frames) > 0:
             try:
                 # 创建输出目录
                 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -495,27 +500,30 @@ class TwoCarrierEnv(gym.Env):
                     print(f"已保存关键帧至: {output_dir}，共保存 {len(self.render_frames[::10])} 张")
                 except Exception as e2:
                     print(f"保存关键帧也失败，错误：{type(e2).__name__}: {e2}")
-        elif self.render_mode == "rgb_array" and len(self.render_frames) == 0:
-            print("警告：未生成任何视频帧，无法创建视频！请检查帧渲染逻辑是否正常执行")
+        elif self.enable_visualization and self.render_mode == "rgb_array" and len(self.render_frames) == 0:
+            print("警告：未生成任何视频帧，无法创建视频！")
         else:
-            print("非rgb_array模式，不生成视频")
+            print("可视化功能已关闭或非rgb_array模式，不生成视频")
 
 
 # 注册环境（便于通过gym.make()调用）
 gym.register(
     id="TwoCarrierEnv-v0",
     entry_point=TwoCarrierEnv,
-    max_episode_steps=1000
+    max_episode_steps=1000,
+    kwargs={"enable_visualization": True}  # 添加默认参数
 )
 
 # 测试代码（验证环境是否正常运行）
 if __name__ == "__main__":
     # 创建环境
     RENDER_MODE = "rgb_array"
+    ENABLE_VISUALIZATION = False # 控制是否启用可视化功能
     env = gym.make(
         "TwoCarrierEnv-v0",
         render_mode=RENDER_MODE,
-        config_path=None  # 使用默认2d2c.yaml配置
+        config_path=None,  # 使用默认2d2c.yaml配置
+        enable_visualization=ENABLE_VISUALIZATION
     )
     # 新增：获取原始自定义环境实例（解除TimeLimit包装）
     raw_env = env.unwrapped
@@ -574,7 +582,7 @@ if __name__ == "__main__":
         if video_files:
             print(f"\n仿真结束！视频已保存至当前目录的【output】文件夹，文件名：{video_files[-1]}")
         else:
-            print("\n仿真结束！未生成视频，请查看控制台错误提示排查问题")
+            print("\n仿真结束！未生成视频。")
     elif RENDER_MODE == "human":
         print("\n仿真结束！实时可视化窗口已关闭")
     else:
