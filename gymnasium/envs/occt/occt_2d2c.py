@@ -73,6 +73,8 @@ class TwoCarrierEnv(gym.Env):
         self.fig = None
         self.ax = None
         self.animation = None
+        self.is_sim_finished = False  # 新增：标识仿真是否已结束
+        print(f"初始化渲染模式：{self.render_mode}，是否为rgb_array：{self.render_mode == 'rgb_array'}")
 
     def _load_config(self, config_path):
         """加载同一目录下的2d2c.yaml配置文件"""
@@ -184,19 +186,25 @@ class TwoCarrierEnv(gym.Env):
                 self.model.getXYi(self.model.x, 1)[1] - self.model.getXYi(self.model.x, 0)[1]
             )
         }
+
+        # 新增日志：确认每步是否触发帧渲染
+        # print(f"第 {self.model.count} 步：准备调用_render_frame()，当前渲染模式：{self.render_mode}")
         
         # 渲染处理
+        self._render_frame()  # 移除原有的if判断，统一触发帧渲染
         if self.render_mode == "human":
-            self._render_frame()
+            plt.pause(0.001)  # 仅human模式需要窗口暂停刷新
         
         return observation, reward, terminated, truncated, info
 
-    def reset(self, seed=None, options=None):
+    def reset(self, seed=None, options=None, clear_frames=True):
         """重置环境"""
         super().reset(seed=seed)
         # 重新初始化模型（复用加载的配置）
         self.model = Model2D2C(self.config)
-        self.render_frames = []
+        # 仅当clear_frames为True且仿真未结束时，才清空帧列表
+        if clear_frames and not self.is_sim_finished:
+            self.render_frames = []
         self.trajectories = {   # 重置轨迹
             'cargo': [],
             'car1': [],
@@ -204,9 +212,17 @@ class TwoCarrierEnv(gym.Env):
             'hinge1': [],
             'hinge2': []
         }
-        self._reset_visualization()  # 重置可视化
+        # 强制初始化可视化，无论何种模式
+        self._reset_visualization()  # 确保fig和ax被创建
         observation = self._get_observation()
+        # 新增日志：确认可视化初始化
+        # print(f"环境重置完成，可视化fig是否为空：{self.fig is None}")
         return observation, {}
+
+    # 新增：标记仿真结束的方法
+    def mark_sim_finished(self):
+        self.is_sim_finished = True
+        print("仿真已标记为结束，后续reset()不会清空帧列表")
 
     def _record_trajectories(self):
         """记录轨迹数据用于可视化"""
@@ -232,20 +248,61 @@ class TwoCarrierEnv(gym.Env):
         self.trajectories['hinge2'].append((hinge2_x, hinge2_y))
 
     def _reset_visualization(self):
-        """重置可视化画布（优化画布布局，避免元素遮挡）"""
         if self.fig is not None:
             plt.close(self.fig)
-        # 调整画布大小，预留信息显示区域
         self.fig, self.ax = plt.subplots(figsize=(10, 8))
         self.fig.subplots_adjust(left=0.05, bottom=0.05, right=0.95, top=0.95)
-        # 设置画布背景色，提升对比度
         self.ax.set_facecolor('#f8f8f8')
-    
+        
+        # 初始化所有图形对象（只创建一次，后续仅更新属性）
+        # 1. 超大件
+        self.cargo_patch = patches.Rectangle(
+            (0, 0), 2*self.config.get('oversized_cargo_bias', 2), 
+            self.config.get('oversized_cargo_width', 3),
+            facecolor='#7f8c8d', edgecolor='black', linewidth=1.5, alpha=0.8
+        )
+        self.ax.add_patch(self.cargo_patch)
+        # 超大件质心
+        self.cargo_centroid = self.ax.scatter([], [], color='red', s=50, zorder=5)
+        # 铰接点
+        self.hinge1_scatter = self.ax.scatter([], [], color='blue', s=60, marker='s', zorder=5)
+        self.hinge2_scatter = self.ax.scatter([], [], color='orange', s=60, marker='s', zorder=5)
+        # 铰接点连接线（初始为空）
+        self.hinge1_line, = self.ax.plot([], [], color='black', linewidth=1, linestyle=':')
+        self.hinge2_line, = self.ax.plot([], [], color='black', linewidth=1, linestyle=':')
+        
+        # 2. 车辆
+        car_length = 3
+        car_width = 1.5
+        self.car1_patch = patches.Rectangle(
+            (0, 0), car_length, car_width,
+            facecolor='#3498db', edgecolor='black', linewidth=1, alpha=0.8
+        )
+        self.car2_patch = patches.Rectangle(
+            (0, 0), car_length, car_width,
+            facecolor='#e74c3c', edgecolor='black', linewidth=1, alpha=0.8
+        )
+        self.ax.add_patch(self.car1_patch)
+        self.ax.add_patch(self.car2_patch)
+        # 车辆车头
+        self.car1_nose = self.ax.scatter([], [], color='darkblue', s=30, marker='>', zorder=6)
+        self.car2_nose = self.ax.scatter([], [], color='darkred', s=30, marker='>', zorder=6)
+        
+        # 3. 轨迹（初始为空，后续追加新点）
+        self.cargo_traj_line, = self.ax.plot([], [], 'k--', alpha=0.3, linewidth=1)
+        self.car1_traj_line, = self.ax.plot([], [], '#3498db', linestyle='--', alpha=0.4, linewidth=1)
+        self.car2_traj_line, = self.ax.plot([], [], '#e74c3c', linestyle='--', alpha=0.4, linewidth=1)
+        self.hinge1_traj_line, = self.ax.plot([], [], ':', color='blue', alpha=0.2, linewidth=0.8)
+        self.hinge2_traj_line, = self.ax.plot([], [], ':', color='orange', alpha=0.2, linewidth=0.8)
+        
+        # 4. 铰接力矢量（复用对象，更新方向和大小）
+        self.force_quiver = self.ax.quiver([], [], [], [], color='green', width=0.005, headwidth=5, headlength=8, alpha=0.7)
+        
     def _render_frame(self):
         """生成单帧渲染图像（核心优化：超大件+运载车辆可视化增强）"""
-        # 清除当前轴
-        self.ax.clear()
-        
+        # 先判断可视化是否初始化，未初始化则先初始化
+        if self.fig is None or self.ax is None:
+            self._reset_visualization()
         # 获取当前状态数据（精准提取，确保可视化与仿真状态一致）
         x = self.model.x
         Xo, Yo, Psio = x[0], x[1], x[2]
@@ -262,154 +319,96 @@ class TwoCarrierEnv(gym.Env):
         hinge2_x = Xo + self.config['x__o_2'] * np.cos(Psio) - self.config['y__o_2'] * np.sin(Psio)
         hinge2_y = Yo + self.config['x__o_2'] * np.sin(Psio) + self.config['y__o_2'] * np.cos(Psio)
 
-        # 1. 优化坐标范围：自适应所有元素，避免车辆/超大件移出视野
-        all_x = [Xo, car1_cx, car2_cx, hinge1_x, hinge2_x]
-        all_y = [Yo, car1_cy, car2_cy, hinge1_y, hinge2_y]
-        x_min, x_max = min(all_x) - 10, max(all_x) + 10
-        y_min, y_max = min(all_y) - 10, max(all_y) + 10
-        self.ax.set_xlim(x_min, x_max)
-        self.ax.set_ylim(y_min, y_max)
-        self.ax.set_aspect('equal')
-        self.ax.set_xlabel('X 坐标 (m)', fontsize=10)
-        self.ax.set_ylabel('Y 坐标 (m)', fontsize=10)
-        self.ax.set_title('双车运载超大件仿真可视化', fontsize=12, fontweight='bold')
+        # 1. 更新超大件
+        cargo_bias = self.config.get('oversized_cargo_bias', 2)
+        cargo_width = self.config.get('oversized_cargo_width', 3)
+        # 更新位置和旋转角度
+        self.cargo_patch.set_xy((Xo - cargo_bias, Yo - cargo_width/2))
+        self.cargo_patch.set_angle(np.degrees(Psio))
+        # 更新质心和铰接点
+        self.cargo_centroid.set_offsets((Xo, Yo))
+        self.hinge1_scatter.set_offsets((hinge1_x, hinge1_y))
+        self.hinge2_scatter.set_offsets((hinge2_x, hinge2_y))
+        # 更新铰接点连接线
+        self.hinge1_line.set_data([Xo, hinge1_x], [Yo, hinge1_y])
+        self.hinge2_line.set_data([Xo, hinge2_x], [Yo, hinge2_y])
 
-        # 2. 优化超大件可视化：更逼真，标记铰接点和质心
-        cargo_bias = self.config.get('oversized_cargo_bias', 3)
-        cargo_width = self.config.get('oversized_cargo_width', 2.5)
-        # 超大件主体（灰色填充，黑色边框，提升辨识度）
-        cargo = patches.Rectangle(
-            (Xo - cargo_bias, Yo - cargo_width/2),
-            2*cargo_bias, cargo_width,
-            angle=np.degrees(Psio),
-            rotation_point='center',  # 确保绕质心旋转，与仿真一致
-            facecolor='#7f8c8d',      # 深灰色，更贴近真实货物
-            edgecolor='black',        # 黑色边框，区分轮廓
-            linewidth=1.5,
-            alpha=0.8,
-            label='超大件（质心）'
-        )
-        self.ax.add_patch(cargo)
-        # 标记超大件质心（红色圆点，清晰定位）
-        self.ax.scatter(Xo, Yo, color='red', s=50, zorder=5, label='超大件质心')
-        # 标记铰接点（蓝色/橙色方块，区分两车连接点）
-        self.ax.scatter(hinge1_x, hinge1_y, color='blue', s=60, marker='s', zorder=5, label='铰接点1（车1）')
-        self.ax.scatter(hinge2_x, hinge2_y, color='orange', s=60, marker='s', zorder=5, label='铰接点2（车2）')
-        # 绘制超大件与铰接点的连接线（展示连接关系）
-        self.ax.plot([Xo, hinge1_x], [Yo, hinge1_y], color='black', linewidth=1, linestyle=':')
-        self.ax.plot([Xo, hinge2_x], [Yo, hinge2_y], color='black', linewidth=1, linestyle=':')
-
-        # 3. 优化运载车辆可视化：替换箭头为真实车辆形状，区分车头车尾
-        car_length = 3  # 车辆长度
-        car_width = 1.5 # 车辆宽度
-        # 车辆1（蓝色，带车头标记，绕质心旋转）
-        # 车辆矩形（基于质心和姿态角定位，确保与仿真姿态一致）
-        car1 = patches.Rectangle(
-            (car1_cx - car_length/2, car1_cy - car_width/2),
-            car_length, car_width,
-            angle=np.degrees(Psi1),
-            rotation_point='center',
-            facecolor='#3498db',      # 亮蓝色，区分车辆1
-            edgecolor='black',
-            linewidth=1,
-            alpha=0.8,
-            label='运载车辆1'
-        )
-        self.ax.add_patch(car1)
-        # 标记车辆1车头（三角形，指示行驶方向）
+        # 2. 更新车辆
+        car_length = 3
+        car_width = 1.5
+        # 更新车辆1位置和角度
+        self.car1_patch.set_xy((car1_cx - car_length/2, car1_cy - car_width/2))
+        self.car1_patch.set_angle(np.degrees(Psi1))
+        # 更新车辆1车头
         car1_nose_x = car1_cx + (car_length/2) * np.cos(Psi1)
         car1_nose_y = car1_cy + (car_length/2) * np.sin(Psi1)
-        self.ax.scatter(car1_nose_x, car1_nose_y, color='darkblue', s=30, marker='^', zorder=6)
-
-        # 车辆2（红色，带车头标记，绕质心旋转）
-        car2 = patches.Rectangle(
-            (car2_cx - car_length/2, car2_cy - car_width/2),
-            car_length, car_width,
-            angle=np.degrees(Psi2),
-            rotation_point='center',
-            facecolor='#e74c3c',      # 亮红色，区分车辆2
-            edgecolor='black',
-            linewidth=1,
-            alpha=0.8,
-            label='运载车辆2'
-        )
-        self.ax.add_patch(car2)
-        # 标记车辆2车头（三角形，指示行驶方向）
+        self.car1_nose.set_offsets((car1_nose_x, car1_nose_y))
+        # 更新车辆2
+        self.car2_patch.set_xy((car2_cx - car_length/2, car2_cy - car_width/2))
+        self.car2_patch.set_angle(np.degrees(Psi2))
         car2_nose_x = car2_cx + (car_length/2) * np.cos(Psi2)
         car2_nose_y = car2_cy + (car_length/2) * np.sin(Psi2)
-        self.ax.scatter(car2_nose_x, car2_nose_y, color='darkred', s=30, marker='^', zorder=6)
+        self.car2_nose.set_offsets((car2_nose_x, car2_nose_y))
 
-        # 4. 优化轨迹绘制：分层显示，区分不同元素轨迹
+        # 3. 更新轨迹（仅追加新点，不重新绘制全部）
         if len(self.trajectories['cargo']) > 1:
-            # 超大件轨迹（黑色虚线，透明度更低，避免遮挡）
             cargo_traj = np.array(self.trajectories['cargo'])
-            self.ax.plot(cargo_traj[:,0], cargo_traj[:,1], 'k--', alpha=0.3, linewidth=1, label='超大件轨迹')
-            # 车辆1轨迹（蓝色虚线）
+            self.cargo_traj_line.set_data(cargo_traj[:,0], cargo_traj[:,1])
             car1_traj = np.array(self.trajectories['car1'])
-            self.ax.plot(car1_traj[:,0], car1_traj[:,1], '#3498db', linestyle='--', alpha=0.4, linewidth=1, label='车辆1轨迹')
-            # 车辆2轨迹（红色虚线）
+            self.car1_traj_line.set_data(car1_traj[:,0], car1_traj[:,1])
             car2_traj = np.array(self.trajectories['car2'])
-            self.ax.plot(car2_traj[:,0], car2_traj[:,1], '#e74c3c', linestyle='--', alpha=0.4, linewidth=1, label='车辆2轨迹')
-            # 铰接点轨迹（浅灰虚线，补充信息）
+            self.car2_traj_line.set_data(car2_traj[:,0], car2_traj[:,1])
             hinge1_traj = np.array(self.trajectories['hinge1'])
+            self.hinge1_traj_line.set_data(hinge1_traj[:,0], hinge1_traj[:,1])
             hinge2_traj = np.array(self.trajectories['hinge2'])
-            # 铰接点1轨迹：线型为':'，颜色通过color参数指定（蓝色）
-            self.ax.plot(
-                hinge1_traj[:,0], hinge1_traj[:,1], 
-                ':',  # 仅指定线型，颜色单独通过color参数传递
-                color='blue', 
-                alpha=0.2, 
-                linewidth=0.8
-            )
-            # 铰接点2轨迹：线型为':'，颜色通过color参数指定（橙色）
-            self.ax.plot(
-                hinge2_traj[:,0], hinge2_traj[:,1], 
-                ':',  # 仅指定线型，避免与完整颜色名称冲突
-                color='orange', 
-                alpha=0.2, 
-                linewidth=0.8
-            )
-        # 5. 铰接力可视化（优化矢量箭头，避免遮挡）
-        self.ax.quiver(
-            hinge2_x, hinge2_y,  # 从铰接点2出发，更贴合实际受力位置
-            Fh2_x*0.001, Fh2_y*0.001,
-            color='green', 
-            width=0.005, 
-            headwidth=5, 
-            headlength=8,
-            alpha=0.7,
-            label='铰接力（车辆2→超大件）'
-        )
+            self.hinge2_traj_line.set_data(hinge2_traj[:,0], hinge2_traj[:,1])
 
-        # 6. 优化文本信息：避免遮挡，排版更整洁
-        text_props = {'transform': self.ax.transAxes, 'backgroundcolor': 'white', 'fontsize': 9}
-        self.ax.text(0.02, 0.98, f"步数: {self.model.count}", va='top', **text_props)
-        self.ax.text(0.02, 0.94, f"超大件质心：({Xo:.1f}, {Yo:.1f})", va='top', **text_props)
-        self.ax.text(0.02, 0.90, f"铰接力：({Fh2_x:.1f}, {Fh2_y:.1f})", va='top', **text_props)
-        
-        # 优化图例：避免重叠，自动调整位置
-        self.ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
-        # 添加网格，便于读取坐标
-        self.ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+        # 4. 更新铰接力
+        self.force_quiver.set_offsets((hinge2_x, hinge2_y))
+        self.force_quiver.set_UVC(Fh2_x*0.001, Fh2_y*0.001)
 
-        # 渲染为图像（原有逻辑不变，确保兼容性）
-        self.fig.canvas.draw()
-        buf = BytesIO()
-        self.fig.savefig(buf, format='png', bbox_inches='tight', dpi=150)
-        buf.seek(0)
-        img = Image.open(buf).convert('RGB')
-        frame = np.array(img)
+        # 5. 更新坐标范围、文本、图例（按需更新，无需每次重新设置）
+        self.ax.set_xlim(min([Xo, car1_cx, car2_cx])-10, max([Xo, car1_cx, car2_cx])+10)
+        self.ax.set_ylim(min([Yo, car1_cy, car2_cy])-10, max([Yo, car1_cy, car2_cy])+10)
+        self.ax.set_title("两车运载超大件系统仿真可视化", fontsize=16)
 
-        if self.render_mode == "human":
-            plt.pause(0.01)  # 实时显示
-        elif self.render_mode == "rgb_array":
-            self.render_frames.append(frame)
-        
-        return frame
+        # 仅刷新画布，不执行冗余的图像转换
+        self.fig.canvas.draw_idle()  # 高效刷新，比canvas.draw()更快
+
+        # 仅在rgb_array模式下执行图像转换
+        if self.render_mode == "rgb_array":
+            # 新增日志：确认进入帧保存分支
+            # print(f"进入rgb_array帧保存逻辑，当前帧索引：{len(self.render_frames)}")
+            try:
+                buf = BytesIO()
+                self.fig.savefig(buf, format='png', bbox_inches='tight', dpi=150, facecolor=self.fig.get_facecolor())
+                buf.seek(0)
+                img = Image.open(buf).convert('RGB')
+                frame = np.array(img)
+                # 校验帧尺寸（确保所有帧尺寸一致）
+                if len(self.render_frames) > 0:
+                    ref_shape = self.render_frames[0].shape
+                    if frame.shape != ref_shape:
+                        frame = cv2.resize(frame, (ref_shape[1], ref_shape[0]))
+                        # print(f"帧尺寸不一致，已调整为：{ref_shape}")
+                self.render_frames.append(frame)
+                # 释放缓存，避免内存泄漏
+                buf.close()
+                # print(f"第 {len(self.render_frames)} 帧保存成功")
+                return frame
+            except Exception as e:
+                # 新增：捕获帧保存异常
+                print(f"帧保存失败，错误：{type(e).__name__}: {e}")
 
 
     def close(self):
         """关闭环境并生成视频"""
+        # 新增：打印关键状态，确认帧列表和渲染模式
+        print(f"===== 进入close()方法 ======")
+        print(f"当前render_mode：{self.render_mode}")
+        print(f"当前render_frames列表长度：{len(self.render_frames)}")
+        print(f"render_frames是否为列表：{isinstance(self.render_frames, list)}")
+        
         if self.fig is not None:
             plt.close(self.fig)
 
@@ -419,32 +418,52 @@ class TwoCarrierEnv(gym.Env):
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 output_dir = os.path.join(current_dir, "output")
                 os.makedirs(output_dir, exist_ok=True)
+                print(f"输出目录已准备：{output_dir}，共待写入帧数量：{len(self.render_frames)}")
 
                 # 生成视频文件名
-                time_str = datetime.datetime.now().strftime(r'%y%m%d%H%S')
+                time_str = datetime.datetime.now().strftime(r'%y%m%d%H%M%S')  # 修正时间格式，避免重复
                 file_name = f"{self.config_name}_vis_{time_str}.mp4"
                 video_path = os.path.join(output_dir, file_name)
 
-                # 使用OpenCV合成视频
+                # 使用OpenCV合成视频（兼容多系统编码）
                 fps = self.metadata['render_fps']
                 height, width, _ = self.render_frames[0].shape
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                # 兼容Windows/Mac/Linux的编码格式
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4格式（优先）
+                # 备选编码：若mp4v失败，切换为XVID（avi格式）
                 out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+                if not out.isOpened():
+                    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                    video_path = video_path.replace(".mp4", ".avi")
+                    out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+                    print(f"mp4格式不支持，切换为avi格式，保存路径：{video_path}")
 
-                for frame in self.render_frames:
+                # 写入帧
+                for idx, frame in enumerate(self.render_frames):
                     # 转换为BGR格式（OpenCV要求）
-                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                    bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    out.write(bgr_frame)
+                    if idx % 100 == 0:
+                        print(f"已写入 {idx+1}/{len(self.render_frames)} 帧")
 
                 out.release()
-                print(f"可视化视频已保存至: {video_path}")
+                print(f"可视化视频已成功保存至: {video_path}")
 
             except Exception as e:
-                print(f"生成视频失败: {e}")
+                # 暴露具体异常信息，便于排查
+                print(f"生成视频失败，详细错误信息：{type(e).__name__}: {e}")
                 # 保存单帧图像作为备选
-                for i, frame in enumerate(self.render_frames[::10]):  # 每10帧保存一张
-                    img_path = os.path.join(output_dir, f"frame_{i}.png")
-                    cv2.imwrite(img_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                print(f"已保存关键帧至: {output_dir}")
+                try:
+                    for i, frame in enumerate(self.render_frames[::10]):  # 每10帧保存一张
+                        img_path = os.path.join(output_dir, f"frame_{i:03d}.png")
+                        cv2.imwrite(img_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                    print(f"已保存关键帧至: {output_dir}，共保存 {len(self.render_frames[::10])} 张")
+                except Exception as e2:
+                    print(f"保存关键帧也失败，错误：{type(e2).__name__}: {e2}")
+        elif self.render_mode == "rgb_array" and len(self.render_frames) == 0:
+            print("警告：未生成任何视频帧，无法创建视频！请检查帧渲染逻辑是否正常执行")
+        else:
+            print("非rgb_array模式，不生成视频")
 
 
 # 注册环境（便于通过gym.make()调用）
@@ -457,12 +476,16 @@ gym.register(
 # 测试代码（验证环境是否正常运行）
 if __name__ == "__main__":
     # 创建环境
-    RENDER_MODE = "human"  # 可切换为 "rgb_array" 生成视频
+    RENDER_MODE = "rgb_array"
     env = gym.make(
         "TwoCarrierEnv-v0",
         render_mode=RENDER_MODE,
         config_path=None  # 使用默认2d2c.yaml配置
     )
+    # 新增：获取原始自定义环境实例（解除TimeLimit包装）
+    raw_env = env.unwrapped
+    # 新增：确认环境实例的渲染模式
+    print(f"环境实例渲染模式：{raw_env.render_mode}，是否与预期一致：{raw_env.render_mode == RENDER_MODE}")
     obs, info = env.reset(seed=42)
     print("=" * 50)
     print("初始观测形状：", obs.shape)
@@ -493,20 +516,29 @@ if __name__ == "__main__":
                 print(f"  任务状态：终止={terminated} | 截断={truncated}")
                 print("  " + "-" * 20)
 
-            # 若episode结束，重置环境
+            # 若episode结束，不调用reset()（避免清空帧列表），直接跳出循环
             if terminated or truncated:
                 finish_reason = "仿真步数耗尽（truncated）" if truncated else "满足终止条件（terminated）"
                 print(f"  第 {step+1} 步：{finish_reason}，本轮结束")
                 print(f"  本轮累计奖励：{episode_reward:.2f}")
-                obs, info = env.reset()
-                break
+                raw_env.mark_sim_finished()
+                break  # 直接跳出，不调用env.reset()
 
     # 6. 关闭环境，生成视频（仅rgb_array模式生效）
     env.close()
     
-    # 7. 规范输出提示
+    # 7. 规范输出提示（修复虚假提示）
     if RENDER_MODE == "rgb_array":
-        print("\n仿真结束！视频已保存至当前目录的【output】文件夹")
+        # 检查output目录是否有视频文件
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        output_dir = os.path.join(current_dir, "output")
+        video_files = []
+        if os.path.exists(output_dir):
+            video_files = [f for f in os.listdir(output_dir) if f.endswith(('.mp4', '.avi'))]
+        if video_files:
+            print(f"\n仿真结束！视频已保存至当前目录的【output】文件夹，文件名：{video_files[-1]}")
+        else:
+            print("\n仿真结束！未生成视频，请查看控制台错误提示排查问题")
     elif RENDER_MODE == "human":
         print("\n仿真结束！实时可视化窗口已关闭")
     else:
