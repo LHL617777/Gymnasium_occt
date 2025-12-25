@@ -6,6 +6,8 @@ import yaml
 from model import Model2D2C
 import datetime
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+from matplotlib.patches import Polygon
 import matplotlib.patches as patches
 from matplotlib.animation import FuncAnimation
 import cv2
@@ -57,8 +59,8 @@ class TwoCarrierEnv(gym.Env):
             dtype=np.float64
         )
         
-        # 第一辆车的固定控制量（可移到2d2c.yaml中配置）
-        self.u1_fixed = np.array([0, 0, 1e3, 1e3])  # 示例：直驶，固定推力
+        # 第一辆车的固定控制量（简化问题，仅训练第二辆车）
+        self.u1_fixed = np.array([np.pi/6, 0, 1e3, 1e3])  # 示例：固定前轮转角和推力
         
         # 可视化相关初始化
         self.render_mode = render_mode
@@ -74,6 +76,9 @@ class TwoCarrierEnv(gym.Env):
         self.ax = None
         self.animation = None
         self.is_sim_finished = False  # 新增：标识仿真是否已结束
+        # 车轮参数（可放入yaml配置）
+        self.wheel_radius = 0.3  # 车轮半径
+        self.wheel_width = 0.15  # 车轮宽度
         print(f"初始化渲染模式：{self.render_mode}，是否为rgb_array：{self.render_mode == 'rgb_array'}")
 
     def _load_config(self, config_path):
@@ -162,47 +167,39 @@ class TwoCarrierEnv(gym.Env):
 
     def step(self, action):
         """环境一步交互"""
-        # 组合控制量：第一辆车固定控制量 + 第二辆车动作
-        # u = np.concatenate([self.u1_fixed, action])
-        u = self.u1_fixed.tolist() + action.tolist()
+        # 组合控制量：第一辆车控制量 + 第二辆车动作
+        u1 = self.u1_fixed
+        u = np.concatenate([u1, action])
         
-        # 执行仿真步
         self.model.step(u)
-        
-        # 获取观测、奖励
         observation = self._get_observation()
         reward = self._calculate_reward()
-        # 记录轨迹数据
         self._record_trajectories()
         
         # 判断终止条件（仿真结束）
         terminated = self.model.is_finish
-        truncated = False  # 可扩展：如位置误差超过阈值则截断
+        truncated = False  
         info = {
             'Fh2': (self.model.Fh_arch[self.model.count, 2], 
                     self.model.Fh_arch[self.model.count, 3]),
             'pos_error': np.hypot(
                 self.model.getXYi(self.model.x, 1)[0] - self.model.getXYi(self.model.x, 0)[0],
                 self.model.getXYi(self.model.x, 1)[1] - self.model.getXYi(self.model.x, 0)[1]
-            )
+            ),
+            'u1': u1,  # 新增：保存第一辆车控制量，用于可视化车轮摆角
+            'u2': action          # 新增：保存第二辆车控制量，用于可视化车轮摆角
         }
 
-        # 新增日志：确认每步是否触发帧渲染
-        # print(f"第 {self.model.count} 步：准备调用_render_frame()，当前渲染模式：{self.render_mode}")
-        
-        # 渲染处理
-        self._render_frame()  # 移除原有的if判断，统一触发帧渲染
+        self._render_frame()  
         if self.render_mode == "human":
-            plt.pause(0.001)  # 仅human模式需要窗口暂停刷新
+            plt.pause(0.001)  
         
         return observation, reward, terminated, truncated, info
 
     def reset(self, seed=None, options=None, clear_frames=True):
         """重置环境"""
         super().reset(seed=seed)
-        # 重新初始化模型（复用加载的配置）
         self.model = Model2D2C(self.config)
-        # 仅当clear_frames为True且仿真未结束时，才清空帧列表
         if clear_frames and not self.is_sim_finished:
             self.render_frames = []
         self.trajectories = {   # 重置轨迹
@@ -212,194 +209,232 @@ class TwoCarrierEnv(gym.Env):
             'hinge1': [],
             'hinge2': []
         }
-        # 强制初始化可视化，无论何种模式
         self._reset_visualization()  # 确保fig和ax被创建
         observation = self._get_observation()
-        # 新增日志：确认可视化初始化
-        # print(f"环境重置完成，可视化fig是否为空：{self.fig is None}")
         return observation, {}
 
-    # 新增：标记仿真结束的方法
     def mark_sim_finished(self):
         self.is_sim_finished = True
         print("仿真已标记为结束，后续reset()不会清空帧列表")
 
     def _record_trajectories(self):
-        """记录轨迹数据用于可视化"""
-        # 超大件位置
-        cargo_pos = (self.model.x[0], self.model.x[1])
-        self.trajectories['cargo'].append(cargo_pos)
-        
-        # 车辆位置
-        x1, y1 = self.model.getXYi(self.model.x, 0)
-        x2, y2 = self.model.getXYi(self.model.x, 1)
-        self.trajectories['car1'].append((x1, y1))
-        self.trajectories['car2'].append((x2, y2))
+        """更新轨迹记录，使用参考代码的坐标获取方法，确保数据一致"""
+        i_sim = self.model.count
+        x = self.model.x_arch[i_sim, :]
 
-        # 新增：铰接点轨迹（清晰展示车辆与超大件的连接关系）
-        Xo, Yo, Psio = self.model.x[0], self.model.x[1], self.model.x[2]
-        # 铰接点1（车辆1与超大件连接点）
-        hinge1_x = Xo + self.config['x__o_1'] * np.cos(Psio) - self.config['y__o_1'] * np.sin(Psio)
-        hinge1_y = Yo + self.config['x__o_1'] * np.sin(Psio) + self.config['y__o_1'] * np.cos(Psio)
-        # 铰接点2（车辆2与超大件连接点）
-        hinge2_x = Xo + self.config['x__o_2'] * np.cos(Psio) - self.config['y__o_2'] * np.sin(Psio)
-        hinge2_y = Yo + self.config['x__o_2'] * np.sin(Psio) + self.config['y__o_2'] * np.cos(Psio)
-        self.trajectories['hinge1'].append((hinge1_x, hinge1_y))
-        self.trajectories['hinge2'].append((hinge2_x, hinge2_y))
+        # 超大件质心
+        cargo_pos = (x[0], x[1])
+        self.trajectories['cargo'].append(cargo_pos)
+
+        # 车辆质心（使用参考代码的getXYi方法）
+        car1_pos = self.model.getXYi(x, 0)
+        car2_pos = self.model.getXYi(x, 1)
+        self.trajectories['car1'].append(car1_pos)
+        self.trajectories['car2'].append(car2_pos)
+
+        # 铰接点（使用参考代码的getXYhi方法）
+        hinge1_pos = self.model.getXYhi(x, 0)
+        hinge2_pos = self.model.getXYhi(x, 1)
+        self.trajectories['hinge1'].append(hinge1_pos)
+        self.trajectories['hinge2'].append(hinge2_pos)
 
     def _reset_visualization(self):
+        """重构可视化初始化，完全参考参考代码的绘图元素类型"""
         if self.fig is not None:
             plt.close(self.fig)
-        self.fig, self.ax = plt.subplots(figsize=(10, 8))
+        self.fig, self.ax = plt.subplots(figsize=(15, 15), dpi=80)
         self.fig.subplots_adjust(left=0.05, bottom=0.05, right=0.95, top=0.95)
         self.ax.set_facecolor('#f8f8f8')
-        
-        # 初始化所有图形对象（只创建一次，后续仅更新属性）
-        # 1. 超大件
-        self.cargo_patch = patches.Rectangle(
-            (0, 0), 2*self.config.get('oversized_cargo_bias', 2), 
-            self.config.get('oversized_cargo_width', 3),
-            facecolor='#7f8c8d', edgecolor='black', linewidth=1.5, alpha=0.8
-        )
-        self.ax.add_patch(self.cargo_patch)
-        # 超大件质心
-        self.cargo_centroid = self.ax.scatter([], [], color='red', s=50, zorder=5)
-        # 铰接点
-        self.hinge1_scatter = self.ax.scatter([], [], color='blue', s=60, marker='s', zorder=5)
-        self.hinge2_scatter = self.ax.scatter([], [], color='orange', s=60, marker='s', zorder=5)
-        # 铰接点连接线（初始为空）
-        self.hinge1_line, = self.ax.plot([], [], color='black', linewidth=1, linestyle=':')
-        self.hinge2_line, = self.ax.plot([], [], color='black', linewidth=1, linestyle=':')
-        
-        # 2. 车辆
-        car_length = 3
-        car_width = 1.5
-        self.car1_patch = patches.Rectangle(
-            (0, 0), car_length, car_width,
-            facecolor='#3498db', edgecolor='black', linewidth=1, alpha=0.8
-        )
-        self.car2_patch = patches.Rectangle(
-            (0, 0), car_length, car_width,
-            facecolor='#e74c3c', edgecolor='black', linewidth=1, alpha=0.8
-        )
-        self.ax.add_patch(self.car1_patch)
-        self.ax.add_patch(self.car2_patch)
-        # 车辆车头
-        self.car1_nose = self.ax.scatter([], [], color='darkblue', s=30, marker='>', zorder=6)
-        self.car2_nose = self.ax.scatter([], [], color='darkred', s=30, marker='>', zorder=6)
-        
-        # 3. 轨迹（初始为空，后续追加新点）
-        self.cargo_traj_line, = self.ax.plot([], [], 'k--', alpha=0.3, linewidth=1)
-        self.car1_traj_line, = self.ax.plot([], [], '#3498db', linestyle='--', alpha=0.4, linewidth=1)
-        self.car2_traj_line, = self.ax.plot([], [], '#e74c3c', linestyle='--', alpha=0.4, linewidth=1)
-        self.hinge1_traj_line, = self.ax.plot([], [], ':', color='blue', alpha=0.2, linewidth=0.8)
-        self.hinge2_traj_line, = self.ax.plot([], [], ':', color='orange', alpha=0.2, linewidth=0.8)
-        
-        # 4. 铰接力矢量（复用对象，更新方向和大小）
-        self.force_quiver = self.ax.quiver([], [], [], [], color='green', width=0.005, headwidth=5, headlength=8, alpha=0.7)
-        
-    def _render_frame(self):
-        """生成单帧渲染图像（核心优化：超大件+运载车辆可视化增强）"""
-        # 先判断可视化是否初始化，未初始化则先初始化
-        if self.fig is None or self.ax is None:
-            self._reset_visualization()
-        # 获取当前状态数据（精准提取，确保可视化与仿真状态一致）
-        x = self.model.x
-        Xo, Yo, Psio = x[0], x[1], x[2]
-        Psi1, Psi2 = x[3], x[4]
-        # 车辆质心位置
-        car1_cx, car1_cy = self.model.getXYi(x, 0)
-        car2_cx, car2_cy = self.model.getXYi(x, 1)
-        # 铰接力
-        Fh2_x = self.model.Fh_arch[self.model.count, 2]
-        Fh2_y = self.model.Fh_arch[self.model.count, 3]
-        # 铰接点位置（超大件与车辆的连接点，基于配置计算）
-        hinge1_x = Xo + self.config['x__o_1'] * np.cos(Psio) - self.config['y__o_1'] * np.sin(Psio)
-        hinge1_y = Yo + self.config['x__o_1'] * np.sin(Psio) + self.config['y__o_1'] * np.cos(Psio)
-        hinge2_x = Xo + self.config['x__o_2'] * np.cos(Psio) - self.config['y__o_2'] * np.sin(Psio)
-        hinge2_y = Yo + self.config['x__o_2'] * np.sin(Psio) + self.config['y__o_2'] * np.cos(Psio)
-
-        # 1. 更新超大件
-        cargo_bias = self.config.get('oversized_cargo_bias', 2)
-        cargo_width = self.config.get('oversized_cargo_width', 3)
-        # 更新位置和旋转角度
-        self.cargo_patch.set_xy((Xo - cargo_bias, Yo - cargo_width/2))
-        self.cargo_patch.set_angle(np.degrees(Psio))
-        # 更新质心和铰接点
-        self.cargo_centroid.set_offsets((Xo, Yo))
-        self.hinge1_scatter.set_offsets((hinge1_x, hinge1_y))
-        self.hinge2_scatter.set_offsets((hinge2_x, hinge2_y))
-        # 更新铰接点连接线
-        self.hinge1_line.set_data([Xo, hinge1_x], [Yo, hinge1_y])
-        self.hinge2_line.set_data([Xo, hinge2_x], [Yo, hinge2_y])
-
-        # 2. 更新车辆
-        car_length = 3
-        car_width = 1.5
-        # 更新车辆1位置和角度
-        self.car1_patch.set_xy((car1_cx - car_length/2, car1_cy - car_width/2))
-        self.car1_patch.set_angle(np.degrees(Psi1))
-        # 更新车辆1车头
-        car1_nose_x = car1_cx + (car_length/2) * np.cos(Psi1)
-        car1_nose_y = car1_cy + (car_length/2) * np.sin(Psi1)
-        self.car1_nose.set_offsets((car1_nose_x, car1_nose_y))
-        # 更新车辆2
-        self.car2_patch.set_xy((car2_cx - car_length/2, car2_cy - car_width/2))
-        self.car2_patch.set_angle(np.degrees(Psi2))
-        car2_nose_x = car2_cx + (car_length/2) * np.cos(Psi2)
-        car2_nose_y = car2_cy + (car_length/2) * np.sin(Psi2)
-        self.car2_nose.set_offsets((car2_nose_x, car2_nose_y))
-
-        # 3. 更新轨迹（仅追加新点，不重新绘制全部）
-        if len(self.trajectories['cargo']) > 1:
-            cargo_traj = np.array(self.trajectories['cargo'])
-            self.cargo_traj_line.set_data(cargo_traj[:,0], cargo_traj[:,1])
-            car1_traj = np.array(self.trajectories['car1'])
-            self.car1_traj_line.set_data(car1_traj[:,0], car1_traj[:,1])
-            car2_traj = np.array(self.trajectories['car2'])
-            self.car2_traj_line.set_data(car2_traj[:,0], car2_traj[:,1])
-            hinge1_traj = np.array(self.trajectories['hinge1'])
-            self.hinge1_traj_line.set_data(hinge1_traj[:,0], hinge1_traj[:,1])
-            hinge2_traj = np.array(self.trajectories['hinge2'])
-            self.hinge2_traj_line.set_data(hinge2_traj[:,0], hinge2_traj[:,1])
-
-        # 4. 更新铰接力
-        self.force_quiver.set_offsets((hinge2_x, hinge2_y))
-        self.force_quiver.set_UVC(Fh2_x*0.001, Fh2_y*0.001)
-
-        # 5. 更新坐标范围、文本、图例（按需更新，无需每次重新设置）
-        self.ax.set_xlim(min([Xo, car1_cx, car2_cx])-10, max([Xo, car1_cx, car2_cx])+10)
-        self.ax.set_ylim(min([Yo, car1_cy, car2_cy])-10, max([Yo, car1_cy, car2_cy])+10)
+        self.ax.set_xlabel('X (m)', fontsize=20)
+        self.ax.set_ylabel('Y (m)', fontsize=20)
+        self.ax.set_aspect('equal', adjustable='box')
         self.ax.set_title("两车运载超大件系统仿真可视化", fontsize=16)
 
-        # 仅刷新画布，不执行冗余的图像转换
-        self.fig.canvas.draw_idle()  # 高效刷新，比canvas.draw()更快
+        # 初始化绘图句柄（与参考代码一一对应）
+        self.plot_handles = {
+            # 1. 车轮：线集合（LineCollection）
+            'tire': None,
+            # 2. 铰接力：箭头列表
+            'Fh': [],
+            # 3. 铰接点：多边形列表
+            'hinge': [],
+            # 4. 货物：多边形
+            'cargo': None,
+            # 5. 车辆：多边形列表（两车）
+            'car': [],
+            # 6. 轨迹线：保持原有轨迹逻辑
+            'cargo_traj': self.ax.plot([], [], 'k--', alpha=0.3, linewidth=1)[0],
+            'car1_traj': self.ax.plot([], [], '#3498db', linestyle='--', alpha=0.4, linewidth=1)[0],
+            'car2_traj': self.ax.plot([], [], '#e74c3c', linestyle='--', alpha=0.4, linewidth=1)[0],
+            'hinge1_traj': self.ax.plot([], [], ':', color='blue', alpha=0.2, linewidth=0.8)[0],
+            'hinge2_traj': self.ax.plot([], [], ':', color='orange', alpha=0.2, linewidth=0.8)[0]
+        }
 
-        # 仅在rgb_array模式下执行图像转换
+        # 标记是否为首次绘制（首次初始化绘图元素，后续仅更新数据）
+        self.first_render = True
+
+    def _render_frame(self):
+        """重构帧渲染，完全遵循参考代码的坐标变换与可视化逻辑"""
+        # 初始化可视化（若未初始化）
+        if self.fig is None or self.ax is None:
+            self._reset_visualization()
+
+        # 获取当前仿真步数据（与参考代码对齐）
+        i_sim = self.model.count
+        x = self.model.x_arch[i_sim, :]
+        u = self.model.u_arch[i_sim, :]
+
+        # 1. 获取所有可视化数据（复用参考代码的核心方法）
+        # 车轮线段数据
+        tire_segments = self.model.getTireVis(i_sim)
+        # 铰接力箭头+铰接点标记数据
+        fh_arrows, hinge_markers = self.model.getHingeVis(i_sim)
+        # 货物多边形数据
+        cargo_polygon = self.model.getOversizedCargoVis(i_sim)
+        # 车辆多边形数据（两车）
+        car_polygons = self.model.getCarrierVis(i_sim)
+        # 分解铰接力箭头数据，便于更新
+        fh_color = self.model.config.get('c_Fh', 'green')
+        fh_width = self.model.config.get('width_Fh', 0.01)
+
+        # 2. 首次绘制：初始化绘图元素（后续仅更新数据，避免重复创建）
+        if self.first_render:
+            # 2.1 车轮：LineCollection
+            self.plot_handles['tire'] = LineCollection(
+                tire_segments,
+                colors=self.model.config['c_tire'],
+                linewidths=self.model.config['lw_tire'],
+                zorder=2.4
+            )
+            self.ax.add_collection(self.plot_handles['tire'])
+
+            # 2.2 铰接力：箭头
+            for arrow_data in fh_arrows:
+                h = self.ax.arrow(
+                    arrow_data[0], arrow_data[1], arrow_data[2], arrow_data[3],
+                    width=fh_width,  # 固定宽度，后续不再修改
+                    color=fh_color,
+                    zorder=2.4,
+                    alpha=0.7
+                )
+                self.plot_handles['Fh'].append(h)
+
+            # 2.3 铰接点：多边形标记
+            for marker_poly in hinge_markers:
+                h = Polygon(
+                    marker_poly,
+                    zorder=2.6,
+                    alpha=1.0,
+                    fc='black',
+                    ec='white'
+                )
+                self.ax.add_patch(h)
+                self.plot_handles['hinge'].append(h)
+
+            # 2.4 货物：多边形
+            if cargo_polygon:
+                self.plot_handles['cargo'] = Polygon(
+                    cargo_polygon,
+                    zorder=2.5,
+                    alpha=self.model.config['alpha_o'],
+                    fc=self.model.config['fc_o'],
+                    ec='black',
+                    linewidth=1.5
+                )
+                self.ax.add_patch(self.plot_handles['cargo'])
+
+            # 2.5 车辆：多边形（两车分别设置颜色）
+            for i, poly in enumerate(car_polygons):
+                h = Polygon(
+                    poly,
+                    zorder=2.3,
+                    alpha=self.model.config['alpha_c'],
+                    fc=self.model.config['fc_c'][i],
+                    ec='black',
+                    linewidth=1
+                )
+                self.ax.add_patch(h)
+                self.plot_handles['car'].append(h)
+
+            self.first_render = False  # 首次绘制完成，后续仅更新数据
+
+        # 3. 非首次绘制：更新所有绘图元素数据（核心：仅更新数据，不重新创建）
+        else:
+            # 3.1 更新车轮线段
+            self.plot_handles['tire'].set_segments(tire_segments)
+
+            # 3.2 更新铰接力箭头
+            # 移除旧箭头
+            for h in self.plot_handles['Fh']:
+                h.remove()
+            self.plot_handles['Fh'].clear()
+            # 重新绘制新箭头（宽度仍用初始值，不变化）
+            for arrow_data in fh_arrows:
+                h = self.ax.arrow(
+                    arrow_data[0], arrow_data[1], arrow_data[2], arrow_data[3],
+                    width=fh_width,  # 固定宽度，和首次绘制一致
+                    color=fh_color,
+                    zorder=2.4,
+                    alpha=0.7
+                )
+                self.plot_handles['Fh'].append(h)
+
+            # 3.3 更新铰接点标记
+            for h, marker_poly in zip(self.plot_handles['hinge'], hinge_markers):
+                h.set_xy(marker_poly)
+
+            # 3.4 更新货物多边形
+            if cargo_polygon and self.plot_handles['cargo']:
+                self.plot_handles['cargo'].set_xy(cargo_polygon)
+            elif self.plot_handles['cargo']:
+                # 无货物时移出视野
+                self.plot_handles['cargo'].set_xy([[-1, -1], [-1, -1], [-1, -1], [-1, -1]])
+
+            # 3.5 更新车辆多边形
+            for h, poly in zip(self.plot_handles['car'], car_polygons):
+                h.set_xy(poly)
+
+        # 4. 更新轨迹数据（保持原有逻辑，确保轨迹连贯）
+        if len(self.trajectories['cargo']) > 1:
+            cargo_traj = np.array(self.trajectories['cargo'])
+            self.plot_handles['cargo_traj'].set_data(cargo_traj[:, 0], cargo_traj[:, 1])
+            car1_traj = np.array(self.trajectories['car1'])
+            self.plot_handles['car1_traj'].set_data(car1_traj[:, 0], car1_traj[:, 1])
+            car2_traj = np.array(self.trajectories['car2'])
+            self.plot_handles['car2_traj'].set_data(car2_traj[:, 0], car2_traj[:, 1])
+            hinge1_traj = np.array(self.trajectories['hinge1'])
+            self.plot_handles['hinge1_traj'].set_data(hinge1_traj[:, 0], hinge1_traj[:, 1])
+            hinge2_traj = np.array(self.trajectories['hinge2'])
+            self.plot_handles['hinge2_traj'].set_data(hinge2_traj[:, 0], hinge2_traj[:, 1])
+
+        # 5. 更新坐标范围（与参考代码对齐，基于货物中心）
+        X_o = self.model.x_arch[i_sim, 0]
+        Y_o = self.model.x_arch[i_sim, 1]
+        vis_range = self.model.config['range']
+        self.ax.set_xlim([X_o - vis_range, X_o + vis_range])
+        self.ax.set_ylim([Y_o - vis_range, Y_o + vis_range])
+
+        # 6. 刷新画布（高效刷新）
+        self.fig.canvas.draw_idle()
+
+        # 7. rgb_array模式下保存帧（保持原有逻辑）
         if self.render_mode == "rgb_array":
-            # 新增日志：确认进入帧保存分支
-            # print(f"进入rgb_array帧保存逻辑，当前帧索引：{len(self.render_frames)}")
             try:
                 buf = BytesIO()
                 self.fig.savefig(buf, format='png', bbox_inches='tight', dpi=150, facecolor=self.fig.get_facecolor())
                 buf.seek(0)
                 img = Image.open(buf).convert('RGB')
                 frame = np.array(img)
-                # 校验帧尺寸（确保所有帧尺寸一致）
+                # 校验帧尺寸一致性
                 if len(self.render_frames) > 0:
                     ref_shape = self.render_frames[0].shape
                     if frame.shape != ref_shape:
                         frame = cv2.resize(frame, (ref_shape[1], ref_shape[0]))
-                        # print(f"帧尺寸不一致，已调整为：{ref_shape}")
                 self.render_frames.append(frame)
-                # 释放缓存，避免内存泄漏
                 buf.close()
-                # print(f"第 {len(self.render_frames)} 帧保存成功")
                 return frame
             except Exception as e:
-                # 新增：捕获帧保存异常
                 print(f"帧保存失败，错误：{type(e).__name__}: {e}")
-
 
     def close(self):
         """关闭环境并生成视频"""
@@ -503,7 +538,8 @@ if __name__ == "__main__":
             total_steps += 1
             # 随机采样动作（实际训练时替换为RL算法输出；若要稳定运动，可改用固定动作）
             # 固定动作示例（第二辆车直驶，推力适中）：action = np.array([0, 0, 500, 500])
-            action = env.action_space.sample()
+            # action = env.action_space.sample()
+            action = np.array([0, 0, 500, 500])  # 测试用：第二辆车不动作
             
             # 环境交互
             obs, reward, terminated, truncated, info = env.step(action)

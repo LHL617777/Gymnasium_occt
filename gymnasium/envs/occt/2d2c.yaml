@@ -46,7 +46,6 @@ integrator: "RK4" # 'RK4', 'EE'
 force_safe: 2000.0 # 铰接力安全阈值（可调整）
 size: 0.2
 width_Fh: 0.1
-c_Fh: "#EE7733"
 c_hinge: "#0077BB"
 ms_hinge: 60
 scale_Fh: 0.0003
@@ -60,14 +59,17 @@ load:
 framerate: 10 # frames per second
 range: 6 # XY ±range in the plot
 R: 0.3 # tire radius
-c_tire: "k"
 lw_tire: 20
 alpha_o: 0.4
-fc_o: "#0077BB"
 w_c: 1.2 # width
 fe_c: 1.77 # front end
 re_c: 1.85 # rear end
 alpha_c: 0.6
-fc_c: "#BBBBBB"
+
 oversized_cargo_bias: 3 # 超大件半长
 oversized_cargo_width: 2.5 # 货物宽度
+
+fc_o: "#7f8c8d" # 完整十六进制格式，不要省略字符
+fc_c: ["#3498db", "#e74c3c"] # 列表格式，每个颜色完整
+c_tire: "black"
+c_Fh: "green"
