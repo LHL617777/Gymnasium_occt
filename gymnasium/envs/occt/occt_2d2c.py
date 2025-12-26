@@ -61,9 +61,9 @@ class TwoCarrierEnv(gym.Env):
             high=np.ones(4, dtype=np.float64),  # 归一化上限：[1, 1, 1, 1]
             dtype=np.float64
         )
-        print("动作空间已归一化至[-1, 1]区间")
-        print(f"原始动作范围：\n  转向角：±{np.pi/6:.2f}rad（±30°），推力：[0, {1e3}]")
-        print(f"归一化后动作范围：[-1, 1]（4维）")
+        # print("动作空间已归一化至[-1, 1]区间")
+        # print(f"原始动作范围：\n  转向角：±{np.pi/6:.2f}rad（±30°），推力：[0, {1e3}]")
+        # print(f"归一化后动作范围：[-1, 1]（4维）")
         
         # 第一辆车的固定控制量（简化问题，仅训练第二辆车）
         self.u1_fixed = np.array([np.pi/6, 0, 1e3, 1e3])  # 示例：固定前轮转角和推力
@@ -87,8 +87,8 @@ class TwoCarrierEnv(gym.Env):
         # 车轮参数（可放入yaml配置）
         self.wheel_radius = 0.3  # 车轮半径
         self.wheel_width = 0.15  # 车轮宽度
-        print(f"初始化渲染模式：{self.render_mode}，是否为rgb_array：{self.render_mode == 'rgb_array'}")
-        print(f"可视化功能：{'启用' if enable_visualization else '关闭'}")
+        # print(f"初始化渲染模式：{self.render_mode}，是否为rgb_array：{self.render_mode == 'rgb_array'}")
+        # print(f"可视化功能：{'启用' if enable_visualization else '关闭'}")
 
     def _load_config(self, config_path):
         """加载同一目录下的2d2c.yaml配置文件"""
@@ -107,7 +107,7 @@ class TwoCarrierEnv(gym.Env):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
-            print(f"成功加载YAML配置文件：{config_path}")
+            # print(f"成功加载YAML配置文件：{config_path}")
             return config
         except Exception as e:
             print(f"错误：解析2d2c.yaml失败，原因：{e}，将使用默认配置")
@@ -488,65 +488,65 @@ class TwoCarrierEnv(gym.Env):
     def close(self):
         """关闭环境并生成视频"""
         # 新增：打印关键状态，确认帧列表和渲染模式
-        print(f"===== 进入close()方法 ======")
-        print(f"当前render_mode：{self.render_mode}")
-        print(f"可视化功能状态：{'启用' if self.enable_visualization else '关闭'}")
+        # print(f"===== 进入close()方法 ======")
+        # print(f"当前render_mode：{self.render_mode}")
+        # print(f"可视化功能状态：{'启用' if self.enable_visualization else '关闭'}")
         
         if self.fig is not None:
             plt.close(self.fig)
 
-        if self.enable_visualization and self.render_mode == "rgb_array" and len(self.render_frames) > 0:
-            try:
-                # 创建输出目录
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                output_dir = os.path.join(current_dir, "output")
-                os.makedirs(output_dir, exist_ok=True)
-                print(f"输出目录已准备：{output_dir}，共待写入帧数量：{len(self.render_frames)}")
+        # if self.enable_visualization and self.render_mode == "rgb_array" and len(self.render_frames) > 0:
+        #     try:
+        #         # 创建输出目录
+        #         current_dir = os.path.dirname(os.path.abspath(__file__))
+        #         output_dir = os.path.join(current_dir, "output")
+        #         os.makedirs(output_dir, exist_ok=True)
+        #         print(f"输出目录已准备：{output_dir}，共待写入帧数量：{len(self.render_frames)}")
 
-                # 生成视频文件名
-                time_str = datetime.datetime.now().strftime(r'%y%m%d%H%M%S')  # 修正时间格式，避免重复
-                file_name = f"{self.config_name}_vis_{time_str}.mp4"
-                video_path = os.path.join(output_dir, file_name)
+        #         # 生成视频文件名
+        #         time_str = datetime.datetime.now().strftime(r'%y%m%d%H%M%S')  # 修正时间格式，避免重复
+        #         file_name = f"{self.config_name}_vis_{time_str}.mp4"
+        #         video_path = os.path.join(output_dir, file_name)
 
-                # 使用OpenCV合成视频（兼容多系统编码）
-                fps = self.metadata['render_fps']
-                height, width, _ = self.render_frames[0].shape
-                # 兼容Windows/Mac/Linux的编码格式
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4格式（优先）
-                # 备选编码：若mp4v失败，切换为XVID（avi格式）
-                out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
-                if not out.isOpened():
-                    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-                    video_path = video_path.replace(".mp4", ".avi")
-                    out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
-                    print(f"mp4格式不支持，切换为avi格式，保存路径：{video_path}")
+        #         # 使用OpenCV合成视频（兼容多系统编码）
+        #         fps = self.metadata['render_fps']
+        #         height, width, _ = self.render_frames[0].shape
+        #         # 兼容Windows/Mac/Linux的编码格式
+        #         fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4格式（优先）
+        #         # 备选编码：若mp4v失败，切换为XVID（avi格式）
+        #         out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+        #         if not out.isOpened():
+        #             fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        #             video_path = video_path.replace(".mp4", ".avi")
+        #             out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+        #             print(f"mp4格式不支持，切换为avi格式，保存路径：{video_path}")
 
-                # 写入帧
-                for idx, frame in enumerate(self.render_frames):
-                    # 转换为BGR格式（OpenCV要求）
-                    bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                    out.write(bgr_frame)
-                    if idx % 100 == 0:
-                        print(f"已写入 {idx+1}/{len(self.render_frames)} 帧")
+        #         # 写入帧
+        #         for idx, frame in enumerate(self.render_frames):
+        #             # 转换为BGR格式（OpenCV要求）
+        #             bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        #             out.write(bgr_frame)
+        #             if idx % 100 == 0:
+        #                 print(f"已写入 {idx+1}/{len(self.render_frames)} 帧")
 
-                out.release()
-                print(f"可视化视频已成功保存至: {video_path}")
+        #         out.release()
+        #         print(f"可视化视频已成功保存至: {video_path}")
 
-            except Exception as e:
-                # 暴露具体异常信息，便于排查
-                print(f"生成视频失败，详细错误信息：{type(e).__name__}: {e}")
-                # 保存单帧图像作为备选
-                try:
-                    for i, frame in enumerate(self.render_frames[::10]):  # 每10帧保存一张
-                        img_path = os.path.join(output_dir, f"frame_{i:03d}.png")
-                        cv2.imwrite(img_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                    print(f"已保存关键帧至: {output_dir}，共保存 {len(self.render_frames[::10])} 张")
-                except Exception as e2:
-                    print(f"保存关键帧也失败，错误：{type(e2).__name__}: {e2}")
-        elif self.enable_visualization and self.render_mode == "rgb_array" and len(self.render_frames) == 0:
-            print("警告：未生成任何视频帧，无法创建视频！")
-        else:
-            print("可视化功能已关闭或非rgb_array模式，不生成视频")
+        #     except Exception as e:
+        #         # 暴露具体异常信息，便于排查
+        #         print(f"生成视频失败，详细错误信息：{type(e).__name__}: {e}")
+        #         # 保存单帧图像作为备选
+        #         try:
+        #             for i, frame in enumerate(self.render_frames[::10]):  # 每10帧保存一张
+        #                 img_path = os.path.join(output_dir, f"frame_{i:03d}.png")
+        #                 cv2.imwrite(img_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        #             print(f"已保存关键帧至: {output_dir}，共保存 {len(self.render_frames[::10])} 张")
+        #         except Exception as e2:
+        #             print(f"保存关键帧也失败，错误：{type(e2).__name__}: {e2}")
+        # elif self.enable_visualization and self.render_mode == "rgb_array" and len(self.render_frames) == 0:
+        #     print("警告：未生成任何视频帧，无法创建视频！")
+        # else:
+        #     print("可视化功能已关闭或非rgb_array模式，不生成视频")
 
 
 # 注册环境（便于通过gym.make()调用）

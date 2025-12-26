@@ -646,7 +646,7 @@ class Model2D2C(ModelBase):
         if self.count == 0: self.sim_start_time = time.time()
         self.count += 1
         self.t = self.count * self.dt
-        if self.t % 1 == 0: print('[INFO] sim time:', self.t, 's')
+        # if self.t % 1 == 0: print('[INFO] sim time:', self.t, 's')
 
         self.integrator(u)
 
