@@ -38,14 +38,14 @@ class TwoCarrierEnv(gym.Env):
             -np.pi, -np.pi,      # 两车姿态 Psi_1, Psi_2
             -10, -10, -5,        # 超大件速度 X_dot, Y_dot, Psi_dot_o
             -5, -5,              # 两车角速度 Psi_dot_1, Psi_dot_2
-            -1e4, -1e4           # 铰接力 Fh_x, Fh_y（第二辆车）
+            -1e5, -1e5           # 铰接力 Fh_x, Fh_y（第二辆车）
         ])
         obs_high = np.array([
             100, 100, np.pi,
             np.pi, np.pi,
             10, 10, 5,
             5, 5,
-            1e4, 1e4
+            1e5, 1e5
         ])
         self.observation_space = spaces.Box(
             low=obs_low, high=obs_high, dtype=np.float64
@@ -185,7 +185,7 @@ class TwoCarrierEnv(gym.Env):
         # 1. 铰接力惩罚（核心目标）
         Fh2_x = self.model.Fh_arch[self.model.count, 2]
         Fh2_y = self.model.Fh_arch[self.model.count, 3]
-        hinge_force_penalty = 0.001 * (Fh2_x**2 + Fh2_y**2)  # 缩放因子避免数值过大
+        hinge_force_penalty = 1e-10 * (Fh2_x**2 + Fh2_y**2)  # 缩放因子避免数值过大
         
         # 2. 跟随误差惩罚（位置+姿态）
         X1, Y1 = self.model.getXYi(self.model.x, 0)  # 第一辆车位置

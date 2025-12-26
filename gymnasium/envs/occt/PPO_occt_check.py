@@ -7,6 +7,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.evaluation import evaluate_policy
 from occt_2d2c import TwoCarrierEnv
+from stable_baselines3.common.monitor import Monitor
 
 # 1. 创建向量环境（PPO算法推荐使用向量环境加速训练）
 env_id = "TwoCarrierEnv-v0"
@@ -40,6 +41,7 @@ print("✅ 模型已保存为：ppo_two_carrier.zip")
 # 5. 加载模型并评估性能（验证训练成果，说明环境可用于效果评估）
 loaded_model = PPO.load("ppo_two_carrier")
 eval_env = gym.make(env_id, enable_visualization=False)
+eval_env = Monitor(eval_env)  # 使用Monitor记录评估数据
 mean_reward, std_reward = evaluate_policy(
     loaded_model,
     eval_env,
